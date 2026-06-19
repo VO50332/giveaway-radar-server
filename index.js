@@ -1,4 +1,40 @@
 /* eslint-env node */
+/* eslint-disable no-undef */
+const express = require('express');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const sessionManager = require('./sessionManager');
+
+const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, { cors: { origin: '*' } });
+
+app.use(cors());
+app.use(express.json());
+
+// Load credentials from environment variables
+const API_KEY = process.env.BASE44_API_KEY;
+const APP_ID = process.env.BASE44_APP_ID;
+
+// Health check
+app.get('/health', (req, res) => res.json({ status: 'ok', sessions: sessionManager.getSessionCount() }));
+
+// Start a new WhatsApp session
+app.post('/session/start', async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!API_KEY || !APP_ID) return res.status(500).json({ error: 'Server not configured' });
+
+  try {
+    const result = await sessionManager.startSession(userId, API_KEY, APP_ID, (event, data) => {
+      io.to(`user:${userId}`).emit(event, data);
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
