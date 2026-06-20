@@ -1,4 +1,5 @@
 /* eslint-env node */
+/* eslint-disable no-undef */
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const base44Api = require('./base44Api');
@@ -29,11 +30,11 @@ async function startSession(userId, apiKey, appId, emit) {
   sessions.set(userId, { client, status: 'initializing', apiKey, appId });
 
   client.on('qr', async (qr) => {
-    const qrDataUrl = await qrcode.toDataURL(qr);
     sessions.get(userId).status = 'pending_qr';
-    emit('qr', { qr: qrDataUrl });
-    // Save QR to database so the UI can display it
-    await base44Api.updateSession(userId, apiKey, appId, { status: 'pending_qr', qr_code: qrDataUrl });
+    emit('qr', { qr });
+    // Save raw QR string to database (small, reliable — frontend renders the image)
+    await base44Api.updateSession(userId, apiKey, appId, { status: 'pending_qr', qr_code: qr });
+    console.log(`[${userId}] QR saved to DB (length: ${qr.length})`);
   });
 
   client.on('ready', async () => {
