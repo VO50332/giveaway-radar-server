@@ -23,7 +23,16 @@ async function startSession(userId, apiKey, appId, emit) {
     authStrategy: new LocalAuth({ clientId: userId }),
     puppeteer: {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+      ],
     },
   });
 
@@ -136,7 +145,15 @@ async function startSession(userId, apiKey, appId, emit) {
     await base44Api.updateSession(userId, apiKey, appId, { status: 'disconnected' });
   });
 
-  client.initialize();
+  client.on('auth_failure', async (msg) => {
+    console.error(`[${userId}] Auth failure: ${msg}`);
+    await base44Api.updateSession(userId, apiKey, appId, { status: 'disconnected' });
+  });
+
+  client.initialize().catch(err => {
+    console.error(`[${userId}] client.initialize() failed:`, err.message);
+    base44Api.updateSession(userId, apiKey, appId, { status: 'disconnected' });
+  });
   return { status: 'initializing' };
 }
 
