@@ -39,11 +39,13 @@ async function startSession(userId, apiKey, appId, emit) {
   sessions.set(userId, { client, status: 'initializing', apiKey, appId });
 
   client.on('qr', async (qr) => {
-    sessions.get(userId).status = 'pending_qr';
+    const sess = sessions.get(userId);
+    sess.status = 'pending_qr';
+    sess.qr = qr;  // store in memory for direct retrieval
     emit('qr', { qr });
-    // Save raw QR string to database (small, reliable — frontend renders the image)
+    console.log(`[${userId}] QR generated (length: ${qr.length})`);
+    // Also try saving to DB (best-effort)
     await base44Api.updateSession(userId, apiKey, appId, { status: 'pending_qr', qr_code: qr });
-    console.log(`[${userId}] QR saved to DB (length: ${qr.length})`);
   });
 
   client.on('ready', async () => {
@@ -172,7 +174,8 @@ async function destroySession(userId) {
 
 function getStatus(userId) {
   if (!sessions.has(userId)) return { status: 'not_started' };
-  return { status: sessions.get(userId).status };
+  const s = sessions.get(userId);
+  return { status: s.status, qr: s.qr || null };
 }
 
 function getSessionCount() {
