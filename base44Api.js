@@ -1,4 +1,5 @@
 /* eslint-env node */
+/* eslint-disable no-undef */
 const axios = require('axios');
 
 const BASE_URL = 'https://api.base44.com/api/apps';
@@ -36,10 +37,15 @@ async function updateSession(userId, apiKey, appId, updates) {
     const api = client(apiKey, appId);
     const sessions = await api.list('WhatsAppSession', { user_id: userId });
     if (sessions.length > 0) {
-      await api.update('WhatsAppSession', sessions[0].id, updates);
+      console.log('updateSession: updating', sessions[0].id, 'with keys:', Object.keys(updates));
+      const result = await api.update('WhatsAppSession', sessions[0].id, updates);
+      console.log('updateSession: success');
+      return result;
+    } else {
+      console.error('updateSession: no session found for user', userId);
     }
   } catch (err) {
-    console.error('updateSession error:', err.message);
+    console.error('updateSession error:', err.response?.status, err.response?.data || err.message);
   }
 }
 
