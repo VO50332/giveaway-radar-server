@@ -210,10 +210,25 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     }, 10000);
 
     // Load groups and update DB
-    const chats = await client.getChats();
-    const groups = chats.filter(c => c.isGroup);
+    let chats = await client.getChats();
+    let groups = chats.filter(c => c.isGroup);
+    logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length });
+
+    // WhatsApp may not sync groups immediately on fresh connections — retry with delays
+    if (groups.length === 0) {
+      logEvent(userId, 'groups_empty_retrying', {});
+      for (const delay of [5000, 10000, 15000]) {
+        await new Promise(r => setTimeout(r, delay));
+        chats = await client.getChats();
+        groups = chats.filter(c => c.isGroup);
+        logEvent(userId, 'groups_retry', { count: groups.length, delay });
+        if (groups.length > 0) break;
+      }
+    }
+
     session.groups = groups;
     session.groups_count = groups.length;
+    logEvent(userId, 'groups_final', { count: groups.length, names: groups.map(g => g.name) });
     await base44Api.updateSession(userId, apiKey, appId, { groups_count: groups.length });
     emit('groups', { count: groups.length });
 
