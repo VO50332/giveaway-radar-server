@@ -187,6 +187,7 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     clearTimeout(initTimeout);
     const session = sessions.get(userId);
     session.status = 'connected';
+    session.qr = null; // Clear in-memory QR so the status poll detects connected
     logEvent(userId, 'ready', {});
     emit('ready', { status: 'connected' });
     await base44Api.updateSession(userId, apiKey, appId, { status: 'connected', qr_code: null });
