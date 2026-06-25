@@ -256,7 +256,7 @@ async function processMessage(userId, apiKey, appId, client, msg, emit) {
   const sender = msg.author || msg.from;
 
   const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
-  const isMonitored = monitoredGroups.some(g => g.group_name === groupName && g.is_active);
+  const isMonitored = monitoredGroups.some(g => g.group_name.trim() === groupName.trim() && g.is_active);
   if (!isMonitored) return;
 
   await base44Api.createGroupMessage(userId, apiKey, appId, {
@@ -315,18 +315,29 @@ async function processMessage(userId, apiKey, appId, client, msg, emit) {
 }
 
 async function scanRecentMessages(userId, client, apiKey, appId, emit) {
+  const sess = sessions.get(userId);
   try {
     const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
     const activeGroups = monitoredGroups.filter(g => g.is_active);
     console.log(`[${userId}] Scanning recent messages in ${activeGroups.length} active groups`);
+    if (sess) { sess.eventLog = sess.eventLog || []; sess.eventLog.push({ type: 'scan_start', data: { activeGroups: activeGroups.length, groupNames: activeGroups.map(g => g.group_name) }, ts: Date.now() }); }
+
+    const allChats = await client.getChats();
+    const allGroupNames = allChats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
+    console.log(`[${userId}] WhatsApp has ${allGroupNames.length} groups:`, JSON.stringify(allGroupNames.map(g => g.name)));
+    if (sess) { sess.eventLog.push({ type: 'whatsapp_groups', data: allGroupNames, ts: Date.now() }); }
 
     for (const group of activeGroups) {
-      const chats = await client.getChats();
-      const chat = chats.find(c => c.isGroup && c.name === group.group_name);
-      if (!chat) continue;
+      const chat = allChats.find(c => c.isGroup && c.name.trim() === group.group_name.trim());
+      if (!chat) {
+        console.log(`[${userId}] Group "${group.group_name}" not found in WhatsApp chats`);
+        if (sess) { sess.eventLog.push({ type: 'group_not_found', data: { db_name: group.group_name }, ts: Date.now() }); }
+        continue;
+      }
 
       const messages = await chat.fetchMessages({ limit: 50 });
       console.log(`[${userId}] Scanned ${messages.length} messages in "${group.group_name}"`);
+      if (sess) { sess.eventLog.push({ type: 'scan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
 
       for (const msg of messages) {
         if (!msg.body) continue;
@@ -334,8 +345,10 @@ async function scanRecentMessages(userId, client, apiKey, appId, emit) {
       }
     }
     console.log(`[${userId}] History scan complete`);
+    if (sess) { sess.eventLog.push({ type: 'scan_complete', data: {}, ts: Date.now() }); }
   } catch (err) {
     console.error(`[${userId}] History scan error:`, err.message);
+    if (sess) { sess.eventLog.push({ type: 'scan_error', data: { error: err.message }, ts: Date.now() }); }
   }
 }
 
@@ -410,8 +423,46 @@ async function verifyConnection(userId) {
   }
 }
 
+async function rescanMessages(userId, apiKey, appId) {
+  if (!sessions.has(userId)) return { error: 'no_active_session' };
+  const session = sessions.get(userId);
+  if (session.status !== 'connected') return { error: 'not_connected', status: session.status };
+  let scanned = 0;
+  try {
+    const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
+    const activeGroups = monitoredGroups.filter(g => g.is_active);
+    console.log(`[${userId}] Rescan: ${activeGroups.length} active groups`);
+    const allChats = await session.client.getChats();
+    for (const group of activeGroups) {
+      const chat = allChats.find(c => c.isGroup && c.name.trim() === group.group_name.trim());
+      if (!chat) continue;
+      const messages = await chat.fetchMessages({ limit: 50 });
+      console.log(`[${userId}] Rescan: ${messages.length} msgs in "${group.group_name}"`);
+      for (const msg of messages) {
+        if (!msg.body) continue;
+        await processMessage(userId, apiKey, appId, session.client, msg, () => {});
+        scanned++;
+      }
+    }
+    console.log(`[${userId}] Rescan complete: ${scanned} messages processed`);
+    return { scanned };
+  } catch (err) {
+    console.error(`[${userId}] Rescan error:`, err.message);
+    return { error: err.message };
+  }
+}
+
 function getSessionCount() {
   return sessions.size;
+}
+
+async function getGroups(userId) {
+  if (!sessions.has(userId)) return { error: 'no_active_session' };
+  const session = sessions.get(userId);
+  if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
+  const chats = await session.client.getChats();
+  const groups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
+  return { groups };
 }
 
 // Auto-reconnect all sessions that have saved session_data in the DB
@@ -438,4 +489,4 @@ async function autoReconnect(apiKey, appId) {
   }
 }
 
-module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, verifyConnection, getDiagnostics };
+module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, verifyConnection, getDiagnostics, rescanMessages, getGroups };
