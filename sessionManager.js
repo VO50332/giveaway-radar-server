@@ -210,7 +210,14 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     }, 10000);
 
     // Load groups and update DB
-    let chats = await client.getChats();
+    // getChats() can hang indefinitely if WhatsApp hasn't finished syncing — wrap in a timeout
+    let chats = await Promise.race([
+      client.getChats(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+    ]).catch(err => {
+      logEvent(userId, 'getChats_failed', { error: err.message });
+      return [];
+    });
     let groups = chats.filter(c => c.isGroup);
     logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length });
 
@@ -219,7 +226,13 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
       logEvent(userId, 'groups_empty_retrying', {});
       for (const delay of [5000, 10000, 15000]) {
         await new Promise(r => setTimeout(r, delay));
-        chats = await client.getChats();
+        chats = await Promise.race([
+          client.getChats(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+        ]).catch(err => {
+          logEvent(userId, 'getChats_retry_failed', { error: err.message, delay });
+          return [];
+        });
         groups = chats.filter(c => c.isGroup);
         logEvent(userId, 'groups_retry', { count: groups.length, delay });
         if (groups.length > 0) break;
@@ -337,7 +350,13 @@ async function scanRecentMessages(userId, client, apiKey, appId, emit) {
     console.log(`[${userId}] Scanning recent messages in ${activeGroups.length} active groups`);
     if (sess) { sess.eventLog = sess.eventLog || []; sess.eventLog.push({ type: 'scan_start', data: { activeGroups: activeGroups.length, groupNames: activeGroups.map(g => g.group_name) }, ts: Date.now() }); }
 
-    const allChats = await client.getChats();
+    const allChats = await Promise.race([
+      client.getChats(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+    ]).catch(err => {
+      console.error(`[${userId}] getChats failed in scan:`, err.message);
+      return [];
+    });
     const allGroupNames = allChats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
     console.log(`[${userId}] WhatsApp has ${allGroupNames.length} groups:`, JSON.stringify(allGroupNames.map(g => g.name)));
     if (sess) { sess.eventLog.push({ type: 'whatsapp_groups', data: allGroupNames, ts: Date.now() }); }
@@ -447,7 +466,13 @@ async function rescanMessages(userId, apiKey, appId) {
     const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
     const activeGroups = monitoredGroups.filter(g => g.is_active);
     console.log(`[${userId}] Rescan: ${activeGroups.length} active groups`);
-    const allChats = await session.client.getChats();
+    const allChats = await Promise.race([
+      session.client.getChats(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+    ]).catch(err => {
+      console.error(`[${userId}] Rescan getChats failed:`, err.message);
+      return [];
+    });
     for (const group of activeGroups) {
       const chat = allChats.find(c => c.isGroup && c.name.trim() === group.group_name.trim());
       if (!chat) continue;
@@ -475,13 +500,20 @@ async function getGroups(userId) {
   if (!sessions.has(userId)) return { error: 'no_active_session' };
   const session = sessions.get(userId);
   if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
-  const chats = await session.client.getChats();
+  const chats = await Promise.race([
+    session.client.getChats(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+  ]).catch(err => {
+    return { error: err.message };
+  });
+  if (!Array.isArray(chats)) return { error: chats.error || 'getChats_failed' };
   const groups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
   return { groups };
 }
 
-// Auto-reconnect all sessions that have saved session_data in the DB
+// Auto-reconnect all sessions marked "connected" in the DB
 // Called on server startup to restore connections after redeploy
+// If session_data exists, restore from it; otherwise start fresh (new QR)
 async function autoReconnect(apiKey, appId) {
   try {
     const axios = require('axios');
@@ -492,12 +524,17 @@ async function autoReconnect(apiKey, appId) {
     const connectedSessions = res.data || [];
 
     for (const sess of connectedSessions) {
-      if (sess.session_data && sess.user_id) {
-        console.log(`[autoReconnect] Restoring session for user ${sess.user_id}`);
-        startSession(sess.user_id, apiKey, appId, () => {}).catch(err => {
-          console.error(`[autoReconnect] Failed for ${sess.user_id}:`, err.message);
-        });
+      if (!sess.user_id) continue;
+      if (sess.session_data) {
+        console.log(`[autoReconnect] Restoring session for user ${sess.user_id} from saved data`);
+      } else {
+        console.log(`[autoReconnect] No session_data for user ${sess.user_id} — starting fresh (will generate QR)`);
+        // Mark as pending_qr so the UI shows the QR prompt
+        await axios.put(`${BASE_URL}/${appId}/entities/WhatsAppSession/${sess.id}`, { status: 'pending_qr', qr_code: null }, { headers });
       }
+      startSession(sess.user_id, apiKey, appId, () => {}).catch(err => {
+        console.error(`[autoReconnect] Failed for ${sess.user_id}:`, err.message);
+      });
     }
   } catch (err) {
     console.error('[autoReconnect] error:', err.message);
