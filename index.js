@@ -90,6 +90,29 @@ app.get('/session/status/:userId', (req, res) => {
   res.json(status);
 });
 
+// Rescan recent messages in all active groups
+app.post('/session/rescan/:userId', async (req, res) => {
+  const apiKey = req.body.apiKey || process.env.BASE44_API_KEY;
+  const appId = req.body.appId || process.env.BASE44_APP_ID;
+  if (!apiKey || !appId) return res.status(400).json({ error: 'Missing credentials' });
+  try {
+    const result = await sessionManager.rescanMessages(req.params.userId, apiKey, appId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List all WhatsApp group names (for debugging group name mismatch)
+app.get('/session/groups/:userId', async (req, res) => {
+  try {
+    const groups = await sessionManager.getGroups(req.params.userId);
+    res.json(groups);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Verify that the WhatsApp connection is actually alive (not just in-memory status)
 app.get('/session/verify/:userId', async (req, res) => {
   try {
