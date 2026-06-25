@@ -39,9 +39,37 @@ app.post('/session/start', async (req, res) => {
   }
 
   try {
-    const result = await sessionManager.startSession(userId, apiKey, effectiveAppId, (event, data) => {
-      io.to(`user:${userId}`).emit(event, data);
-    });
+    const freshStart = req.body.freshStart === true;
+    const result = await sessionManager.startSession(
+      userId,
+      apiKey,
+      effectiveAppId,
+      (event, data) => { io.to(`user:${userId}`).emit(event, data); },
+      { freshStart }
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Force a fresh start — clears all stale session data and generates a new QR
+app.post('/session/fresh-start', async (req, res) => {
+  const { userId, appId } = req.body;
+  const apiKey = req.body.apiKey || process.env.BASE44_API_KEY;
+  const effectiveAppId = appId || process.env.BASE44_APP_ID;
+  if (!userId || !apiKey || !effectiveAppId) {
+    return res.status(400).json({ error: 'Missing credentials' });
+  }
+  try {
+    await sessionManager.disconnectSession(userId);
+    const result = await sessionManager.startSession(
+      userId,
+      apiKey,
+      effectiveAppId,
+      (event, data) => { io.to(`user:${userId}`).emit(event, data); },
+      { freshStart: true }
+    );
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -60,6 +88,26 @@ app.post('/session/disconnect', async (req, res) => {
 app.get('/session/status/:userId', (req, res) => {
   const status = sessionManager.getStatus(req.params.userId);
   res.json(status);
+});
+
+// Verify that the WhatsApp connection is actually alive (not just in-memory status)
+app.get('/session/verify/:userId', async (req, res) => {
+  try {
+    const result = await sessionManager.verifyConnection(req.params.userId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+// Full diagnostics — library version, Chromium, session event log
+app.get('/session/diagnostics/:userId', (req, res) => {
+  try {
+    const diag = sessionManager.getDiagnostics(req.params.userId);
+    res.json(diag);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Debug: test puppeteer/chromium availability
@@ -87,4 +135,12 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`GiveAway Radar server running on port ${PORT}`);
+  // Auto-reconnect WhatsApp sessions that were previously connected
+  const apiKey = process.env.BASE44_API_KEY;
+  const appId = process.env.BASE44_APP_ID;
+  if (apiKey && appId) {
+    setTimeout(() => sessionManager.autoReconnect(apiKey, appId), 3000);
+  } else {
+    console.log('Auto-reconnect skipped: BASE44_API_KEY or BASE44_APP_ID not set');
+  }
 });
