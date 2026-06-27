@@ -217,7 +217,7 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     logEvent(userId, 'sync_wait_start', {});
     await new Promise(r => setTimeout(r, 20000));
 
-    // Load groups — getChats() reads from the synced local store
+    // Try to load groups via getChats — but this often hangs on Railway, so don't retry aggressively
     let chats = await Promise.race([
       client.getChats(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
@@ -228,27 +228,24 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     let groups = chats.filter(c => c.isGroup);
     logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length });
 
-    // Retry with longer delays if groups haven't synced yet
+    // Only retry once if getChats returned no groups
     if (groups.length === 0) {
       logEvent(userId, 'groups_empty_retrying', {});
-      for (const delay of [15000, 30000, 45000]) {
-        await new Promise(r => setTimeout(r, delay));
-        chats = await Promise.race([
-          client.getChats(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-        ]).catch(err => {
-          logEvent(userId, 'getChats_retry_failed', { error: err.message, delay });
-          return [];
-        });
-        groups = chats.filter(c => c.isGroup);
-        logEvent(userId, 'groups_retry', { count: groups.length, delay });
-        if (groups.length > 0) break;
-      }
+      await new Promise(r => setTimeout(r, 30000));
+      chats = await Promise.race([
+        client.getChats(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
+      ]).catch(err => {
+        logEvent(userId, 'getChats_retry_failed', { error: err.message });
+        return [];
+      });
+      groups = chats.filter(c => c.isGroup);
+      logEvent(userId, 'groups_retry', { count: groups.length });
     }
 
     session.groups = groups;
     session.groups_count = groups.length;
-    logEvent(userId, 'groups_final', { count: groups.length, names: groups.map(g => g.name) });
+    logEvent(userId, 'groups_final', { count: groups.length });
     await base44Api.updateSession(userId, apiKey, appId, { groups_count: groups.length });
     emit('groups', { count: groups.length });
 
@@ -288,8 +285,13 @@ async function processMessage(userId, apiKey, appId, client, msg, emit) {
   const sender = msg.author || msg.from;
 
   const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
-  const isMonitored = monitoredGroups.some(g => g.group_name.trim() === groupName.trim() && g.is_active);
-  if (!isMonitored) return;
+  const matchedGroup = monitoredGroups.find(g => g.group_name.trim() === groupName.trim() && g.is_active);
+  if (!matchedGroup) return;
+
+  // Populate group_id if missing — future rescans can use getChatById() instead of getChats()
+  if (!matchedGroup.group_id || matchedGroup.group_id !== chat.id._serialized) {
+    await base44Api.updateConnectedGroup(apiKey, appId, matchedGroup.id, { group_id: chat.id._serialized });
+  }
 
   await base44Api.createGroupMessage(userId, apiKey, appId, {
     user_id: userId,
@@ -354,32 +356,29 @@ async function scanRecentMessages(userId, client, apiKey, appId, emit) {
     console.log(`[${userId}] Scanning recent messages in ${activeGroups.length} active groups`);
     if (sess) { sess.eventLog = sess.eventLog || []; sess.eventLog.push({ type: 'scan_start', data: { activeGroups: activeGroups.length, groupNames: activeGroups.map(g => g.group_name) }, ts: Date.now() }); }
 
-    const allChats = await Promise.race([
-      client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-    ]).catch(err => {
-      console.error(`[${userId}] getChats failed in scan:`, err.message);
-      return [];
-    });
-    const allGroupNames = allChats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
-    console.log(`[${userId}] WhatsApp has ${allGroupNames.length} groups:`, JSON.stringify(allGroupNames.map(g => g.name)));
-    if (sess) { sess.eventLog.push({ type: 'whatsapp_groups', data: allGroupNames, ts: Date.now() }); }
-
+    // Use getChatById for groups that have a stored group_id — much lighter than getChats()
     for (const group of activeGroups) {
-      const chat = allChats.find(c => c.isGroup && c.name.trim() === group.group_name.trim());
-      if (!chat) {
-        console.log(`[${userId}] Group "${group.group_name}" not found in WhatsApp chats`);
-        if (sess) { sess.eventLog.push({ type: 'group_not_found', data: { db_name: group.group_name }, ts: Date.now() }); }
+      if (!group.group_id) {
+        console.log(`[${userId}] Group "${group.group_name}" has no group_id — skipping (will be populated when a message arrives)`);
+        if (sess) { sess.eventLog.push({ type: 'group_no_id', data: { name: group.group_name }, ts: Date.now() }); }
         continue;
       }
-
-      const messages = await chat.fetchMessages({ limit: 50 });
-      console.log(`[${userId}] Scanned ${messages.length} messages in "${group.group_name}"`);
-      if (sess) { sess.eventLog.push({ type: 'scan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
-
-      for (const msg of messages) {
-        if (!msg.body) continue;
-        await processMessage(userId, apiKey, appId, client, msg, emit);
+      try {
+        const chat = await Promise.race([
+          client.getChatById(group.group_id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
+        ]);
+        if (!chat) continue;
+        const messages = await chat.fetchMessages({ limit: 50 });
+        console.log(`[${userId}] Scanned ${messages.length} messages in "${group.group_name}"`);
+        if (sess) { sess.eventLog.push({ type: 'scan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
+        for (const msg of messages) {
+          if (!msg.body) continue;
+          await processMessage(userId, apiKey, appId, client, msg, emit);
+        }
+      } catch (err) {
+        console.log(`[${userId}] getChatById failed for "${group.group_name}": ${err.message}`);
+        if (sess) { sess.eventLog.push({ type: 'getChatById_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
       }
     }
     console.log(`[${userId}] History scan complete`);
@@ -466,30 +465,39 @@ async function rescanMessages(userId, apiKey, appId) {
   const session = sessions.get(userId);
   if (session.status !== 'connected') return { error: 'not_connected', status: session.status };
   let scanned = 0;
+  let skipped = 0;
   try {
     const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
     const activeGroups = monitoredGroups.filter(g => g.is_active);
     console.log(`[${userId}] Rescan: ${activeGroups.length} active groups`);
-    const allChats = await Promise.race([
-      session.client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-    ]).catch(err => {
-      console.error(`[${userId}] Rescan getChats failed:`, err.message);
-      return [];
-    });
+    if (session.eventLog) { session.eventLog.push({ type: 'rescan_start', data: { activeGroups: activeGroups.length }, ts: Date.now() }); }
+
     for (const group of activeGroups) {
-      const chat = allChats.find(c => c.isGroup && c.name.trim() === group.group_name.trim());
-      if (!chat) continue;
-      const messages = await chat.fetchMessages({ limit: 50 });
-      console.log(`[${userId}] Rescan: ${messages.length} msgs in "${group.group_name}"`);
-      for (const msg of messages) {
-        if (!msg.body) continue;
-        await processMessage(userId, apiKey, appId, session.client, msg, () => {});
-        scanned++;
+      if (!group.group_id) {
+        console.log(`[${userId}] Rescan: "${group.group_name}" has no group_id — skipping`);
+        skipped++;
+        continue;
+      }
+      try {
+        const chat = await Promise.race([
+          session.client.getChatById(group.group_id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
+        ]);
+        const messages = await chat.fetchMessages({ limit: 50 });
+        console.log(`[${userId}] Rescan: ${messages.length} msgs in "${group.group_name}"`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
+        for (const msg of messages) {
+          if (!msg.body) continue;
+          await processMessage(userId, apiKey, appId, session.client, msg, () => {});
+          scanned++;
+        }
+      } catch (err) {
+        console.log(`[${userId}] Rescan: getChatById failed for "${group.group_name}": ${err.message}`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
       }
     }
-    console.log(`[${userId}] Rescan complete: ${scanned} messages processed`);
-    return { scanned };
+    console.log(`[${userId}] Rescan complete: ${scanned} messages processed, ${skipped} groups skipped (no group_id)`);
+    return { scanned, skipped };
   } catch (err) {
     console.error(`[${userId}] Rescan error:`, err.message);
     return { error: err.message };
