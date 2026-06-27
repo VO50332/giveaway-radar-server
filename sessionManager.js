@@ -213,11 +213,14 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     // so session_data is saved even if getChats() hangs later
     await saveSessionToDb(userId, apiKey, appId);
 
-    // Load groups and update DB
-    // getChats() can hang indefinitely if WhatsApp hasn't finished syncing — wrap in a timeout
+    // Wait for WhatsApp to sync chats — on fresh connections this takes 20-40s
+    logEvent(userId, 'sync_wait_start', {});
+    await new Promise(r => setTimeout(r, 20000));
+
+    // Load groups — getChats() reads from the synced local store
     let chats = await Promise.race([
       client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
     ]).catch(err => {
       logEvent(userId, 'getChats_failed', { error: err.message });
       return [];
@@ -225,14 +228,14 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     let groups = chats.filter(c => c.isGroup);
     logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length });
 
-    // WhatsApp may not sync groups immediately on fresh connections — retry with delays
+    // Retry with longer delays if groups haven't synced yet
     if (groups.length === 0) {
       logEvent(userId, 'groups_empty_retrying', {});
-      for (const delay of [5000, 10000, 15000]) {
+      for (const delay of [15000, 30000, 45000]) {
         await new Promise(r => setTimeout(r, delay));
         chats = await Promise.race([
           client.getChats(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
         ]).catch(err => {
           logEvent(userId, 'getChats_retry_failed', { error: err.message, delay });
           return [];
@@ -353,7 +356,7 @@ async function scanRecentMessages(userId, client, apiKey, appId, emit) {
 
     const allChats = await Promise.race([
       client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
     ]).catch(err => {
       console.error(`[${userId}] getChats failed in scan:`, err.message);
       return [];
@@ -469,7 +472,7 @@ async function rescanMessages(userId, apiKey, appId) {
     console.log(`[${userId}] Rescan: ${activeGroups.length} active groups`);
     const allChats = await Promise.race([
       session.client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
     ]).catch(err => {
       console.error(`[${userId}] Rescan getChats failed:`, err.message);
       return [];
@@ -503,7 +506,7 @@ async function getGroups(userId) {
   if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
   const chats = await Promise.race([
     session.client.getChats(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
   ]).catch(err => {
     return { error: err.message };
   });
