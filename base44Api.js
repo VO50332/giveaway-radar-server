@@ -52,8 +52,11 @@ async function updateSession(userId, apiKey, appId, updates) {
 async function getConnectedGroups(userId, apiKey, appId) {
   try {
     const api = client(apiKey, appId);
-    return await api.list('ConnectedGroup', { user_id: userId });
-  } catch {
+    const result = await api.list('ConnectedGroup', { user_id: userId });
+    console.log(`getConnectedGroups: userId=${userId}, found ${result.length} groups`);
+    return result;
+  } catch (err) {
+    console.error(`getConnectedGroups error: userId=${userId}, status=${err.response?.status}, msg=${err.message}`);
     return [];
   }
 }
