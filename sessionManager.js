@@ -209,6 +209,10 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
       }
     }, 10000);
 
+    // Persist session to DB FIRST — before any potentially-hanging operations
+    // so session_data is saved even if getChats() hangs later
+    await saveSessionToDb(userId, apiKey, appId);
+
     // Load groups and update DB
     // getChats() can hang indefinitely if WhatsApp hasn't finished syncing — wrap in a timeout
     let chats = await Promise.race([
@@ -244,9 +248,6 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     logEvent(userId, 'groups_final', { count: groups.length, names: groups.map(g => g.name) });
     await base44Api.updateSession(userId, apiKey, appId, { groups_count: groups.length });
     emit('groups', { count: groups.length });
-
-    // Persist session to DB so it survives redeploys
-    await saveSessionToDb(userId, apiKey, appId);
 
     // Scan recent messages in active groups for matches
     await scanRecentMessages(userId, client, apiKey, appId, emit);
