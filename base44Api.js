@@ -95,6 +95,15 @@ async function createNotification(userId, apiKey, appId, data) {
   }
 }
 
+async function updateConnectedGroup(apiKey, appId, groupId, updates) {
+  try {
+    const api = client(apiKey, appId);
+    return await api.update('ConnectedGroup', groupId, updates);
+  } catch (err) {
+    console.error('updateConnectedGroup error:', err.message);
+  }
+}
+
 async function getUserPhone(userId, apiKey, appId) {
   try {
     const api = client(apiKey, appId);
@@ -113,4 +122,5 @@ module.exports = {
   createMatch,
   createNotification,
   getUserPhone,
+  updateConnectedGroup,
 };
