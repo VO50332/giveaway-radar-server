@@ -346,36 +346,60 @@ async function processMessage(userId, apiKey, appId, client, msg, emit) {
   }
 }
 
-async function syncGroupIds(userId, client, apiKey, appId) {
+async function syncGroupIds(userId, client, apiKey, appId, debug = {}) {
   const sess = sessions.get(userId);
   let groups = sess?.groups;
+  debug.syncDebug = { hadCachedGroups: !!(groups && groups.length > 0), cachedCount: groups?.length || 0 };
+
   if (!groups || groups.length === 0) {
     try {
       const chats = await Promise.race([
         client.getChats(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-      ]).catch(() => []);
-      groups = chats.filter ? chats.filter(c => c.isGroup) : [];
+      ]).catch(err => {
+        debug.syncDebug.getChatsError = err.message;
+        return [];
+      });
+      groups = Array.isArray(chats) ? chats.filter(c => c.isGroup) : [];
+      debug.syncDebug.getChatsTotalChats = Array.isArray(chats) ? chats.length : 0;
       if (sess) sess.groups = groups;
-    } catch {
+    } catch (err) {
+      debug.syncDebug.getChatsError = err.message;
       groups = [];
     }
   }
+
+  debug.syncDebug.whatsappGroupCount = groups?.length || 0;
+  debug.syncDebug.whatsappGroupNames = (groups || []).map(g => g.name);
+
   if (!groups || groups.length === 0) {
     console.log(`[${userId}] syncGroupIds: no WhatsApp groups available`);
-    return await base44Api.getConnectedGroups(userId, apiKey, appId);
+    const fallback = await base44Api.getConnectedGroups(userId, apiKey, appId);
+    debug.syncDebug.dbGroupCount = fallback.length;
+    debug.syncDebug.dbGroups = fallback.map(g => ({ name: g.group_name, group_id: g.group_id || null }));
+    return fallback;
   }
 
   const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
   let updated = 0;
+  debug.syncDebug.dbGroupCount = monitoredGroups.length;
+  debug.syncDebug.dbGroups = monitoredGroups.map(g => ({ name: g.group_name, group_id: g.group_id || null }));
+  debug.syncDebug.matchAttempts = [];
+
   for (const mg of monitoredGroups) {
     const match = groups.find(g => g.name?.trim() === mg.group_name?.trim());
+    debug.syncDebug.matchAttempts.push({
+      dbName: mg.group_name,
+      matched: !!match,
+      waName: match?.name || null,
+    });
     if (match && (!mg.group_id || mg.group_id !== match.id._serialized)) {
       await base44Api.updateConnectedGroup(userId, apiKey, appId, mg.id, { group_id: match.id._serialized });
       mg.group_id = match.id._serialized;
       updated++;
     }
   }
+  debug.syncDebug.updatedCount = updated;
   console.log(`[${userId}] syncGroupIds: ${updated}/${monitoredGroups.length} groups updated`);
   return monitoredGroups;
 }
@@ -507,7 +531,7 @@ async function rescanMessages(userId, apiKey, appId) {
     debug.rawApiError = { message: rawErr.message };
   }
   try {
-    const monitoredGroups = await syncGroupIds(userId, session.client, apiKey, appId);
+    const monitoredGroups = await syncGroupIds(userId, session.client, apiKey, appId, debug);
     console.log(`[${userId}] Rescan: getConnectedGroups returned ${monitoredGroups.length} groups, appId=${appId}`);
     debug.groupsReturned = monitoredGroups.length;
     if (session.eventLog) { session.eventLog.push({ type: 'rescan_groups_loaded', data: { total: monitoredGroups.length, names: monitoredGroups.map(g => g.group_name) }, ts: Date.now() }); }
