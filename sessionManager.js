@@ -43,17 +43,10 @@ async function saveSessionToDb(userId, apiKey, appId) {
 // Restore session files from DB to the filesystem before client init.
 async function restoreSessionFromDb(userId, apiKey, appId) {
   try {
-    const api = require('./base44Api');
-    // We need to read the session_data directly
-    const axios = require('axios');
-    const BASE_URL = 'https://api.base44.com/api/apps';
-    const headers = { 'api-key': apiKey, 'Content-Type': 'application/json' };
-    const params = `?filter=${encodeURIComponent(JSON.stringify({ user_id: userId }))}`;
-    const res = await axios.get(`${BASE_URL}/${appId}/entities/WhatsAppSession${params}`, { headers });
-    const dbSessions = res.data;
-    if (!dbSessions || dbSessions.length === 0 || !dbSessions[0].session_data) return false;
+    const dbSession = await base44Api.getWhatsAppSession(userId, apiKey, appId);
+    if (!dbSession || !dbSession.session_data) return false;
 
-    const files = JSON.parse(dbSessions[0].session_data);
+    const files = JSON.parse(dbSession.session_data);
     const sessionDir = path.join(DATA_DIR, 'session-' + userId);
     fs.mkdirSync(sessionDir, { recursive: true });
 
@@ -467,18 +460,12 @@ async function rescanMessages(userId, apiKey, appId) {
   let scanned = 0;
   let skipped = 0;
   const debug = { hasApiKey: !!apiKey, hasAppId: !!appId, appIdValue: appId, userId };
-  // Diagnostic: make raw API calls to see what the Base44 API actually returns
+  // Diagnostic via SDK
   try {
-    const axios = require('axios');
-    const BASE_URL = 'https://api.base44.com/api/apps';
-    const headers = { 'api-key': apiKey, 'Content-Type': 'application/json' };
-    const filterParams = `?filter=${encodeURIComponent(JSON.stringify({ user_id: userId }))}`;
-    const rawFiltered = await axios.get(`${BASE_URL}/${appId}/entities/ConnectedGroup${filterParams}`, { headers });
-    const rawAll = await axios.get(`${BASE_URL}/${appId}/entities/ConnectedGroup`, { headers });
-    debug.rawFiltered = { status: rawFiltered.status, count: Array.isArray(rawFiltered.data) ? rawFiltered.data.length : 'not_array', sample: Array.isArray(rawFiltered.data) && rawFiltered.data.length > 0 ? { id: rawFiltered.data[0].id, name: rawFiltered.data[0].group_name, user_id: rawFiltered.data[0].user_id } : null };
-    debug.rawAll = { status: rawAll.status, count: Array.isArray(rawAll.data) ? rawAll.data.length : 'not_array', sample: Array.isArray(rawAll.data) && rawAll.data.length > 0 ? { id: rawAll.data[0].id, name: rawAll.data[0].group_name, user_id: rawAll.data[0].user_id } : null };
+    const allGroups = await base44Api.listAllConnectedGroups(apiKey, appId);
+    debug.rawAll = { count: allGroups.length, sample: allGroups.length > 0 ? { id: allGroups[0].id, name: allGroups[0].group_name, user_id: allGroups[0].user_id } : null };
   } catch (rawErr) {
-    debug.rawApiError = { status: rawErr.response?.status, data: rawErr.response?.data, message: rawErr.message };
+    debug.rawApiError = { message: rawErr.message };
   }
   try {
     const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
@@ -545,12 +532,7 @@ async function getGroups(userId) {
 // If session_data exists, restore from it; otherwise start fresh (new QR)
 async function autoReconnect(apiKey, appId) {
   try {
-    const axios = require('axios');
-    const BASE_URL = 'https://api.base44.com/api/apps';
-    const headers = { 'api-key': apiKey, 'Content-Type': 'application/json' };
-    const params = `?filter=${encodeURIComponent(JSON.stringify({ status: 'connected' }))}`;
-    const res = await axios.get(`${BASE_URL}/${appId}/entities/WhatsAppSession${params}`, { headers });
-    const connectedSessions = res.data || [];
+    const connectedSessions = await base44Api.listWhatsAppSessions(apiKey, appId, { status: 'connected' });
 
     for (const sess of connectedSessions) {
       if (!sess.user_id) continue;
@@ -558,8 +540,7 @@ async function autoReconnect(apiKey, appId) {
         console.log(`[autoReconnect] Restoring session for user ${sess.user_id} from saved data`);
       } else {
         console.log(`[autoReconnect] No session_data for user ${sess.user_id} — starting fresh (will generate QR)`);
-        // Mark as pending_qr so the UI shows the QR prompt
-        await axios.put(`${BASE_URL}/${appId}/entities/WhatsAppSession/${sess.id}`, { status: 'pending_qr', qr_code: null }, { headers });
+        await base44Api.updateSession(sess.user_id, apiKey, appId, { status: 'pending_qr', qr_code: null });
       }
       startSession(sess.user_id, apiKey, appId, () => {}).catch(err => {
         console.error(`[autoReconnect] Failed for ${sess.user_id}:`, err.message);
