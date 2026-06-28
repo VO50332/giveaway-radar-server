@@ -23,17 +23,18 @@ app.get('/health', (req, res) => res.json({ status: 'ok', sessions: sessionManag
 
 // Start a new WhatsApp session for a user
 app.post('/session/start', async (req, res) => {
-  const { userId, appId } = req.body;
-  const apiKey = req.body.apiKey || process.env.BASE44_API_KEY;
-  const effectiveAppId = appId || process.env.BASE44_APP_ID;
-  if (!userId || !apiKey || !effectiveAppId) {
+  const { userId } = req.body;
+  const effectiveAppId = req.body.appId || process.env.BASE44_APP_ID;
+  const hasAuth = process.env.BASE44_USER_EMAIL && process.env.BASE44_USER_PASSWORD;
+  if (!userId || !hasAuth || !effectiveAppId) {
     return res.status(400).json({
       error: 'Missing credentials',
       details: {
         userId: !!userId,
-        apiKey: !!apiKey,
+        hasEmail: !!process.env.BASE44_USER_EMAIL,
+        hasPassword: !!process.env.BASE44_USER_PASSWORD,
         appId: !!effectiveAppId,
-        hint: apiKey ? undefined : 'Set BASE44_API_KEY env var on Railway or pass apiKey in request body',
+        hint: hasAuth ? undefined : 'Set BASE44_USER_EMAIL and BASE44_USER_PASSWORD env vars on Railway',
       }
     });
   }
@@ -42,7 +43,7 @@ app.post('/session/start', async (req, res) => {
     const freshStart = req.body.freshStart === true;
     const result = await sessionManager.startSession(
       userId,
-      apiKey,
+      null,
       effectiveAppId,
       (event, data) => { io.to(`user:${userId}`).emit(event, data); },
       { freshStart }
@@ -55,17 +56,16 @@ app.post('/session/start', async (req, res) => {
 
 // Force a fresh start — clears all stale session data and generates a new QR
 app.post('/session/fresh-start', async (req, res) => {
-  const { userId, appId } = req.body;
-  const apiKey = req.body.apiKey || process.env.BASE44_API_KEY;
-  const effectiveAppId = appId || process.env.BASE44_APP_ID;
-  if (!userId || !apiKey || !effectiveAppId) {
+  const { userId } = req.body;
+  const effectiveAppId = req.body.appId || process.env.BASE44_APP_ID;
+  if (!userId || !effectiveAppId) {
     return res.status(400).json({ error: 'Missing credentials' });
   }
   try {
     await sessionManager.disconnectSession(userId);
     const result = await sessionManager.startSession(
       userId,
-      apiKey,
+      null,
       effectiveAppId,
       (event, data) => { io.to(`user:${userId}`).emit(event, data); },
       { freshStart: true }
@@ -92,11 +92,10 @@ app.get('/session/status/:userId', (req, res) => {
 
 // Rescan recent messages in all active groups
 app.post('/session/rescan/:userId', async (req, res) => {
-  const apiKey = req.body.apiKey || process.env.BASE44_API_KEY;
   const appId = req.body.appId || process.env.BASE44_APP_ID;
-  if (!apiKey || !appId) return res.status(400).json({ error: 'Missing credentials' });
+  if (!appId) return res.status(400).json({ error: 'Missing appId' });
   try {
-    const result = await sessionManager.rescanMessages(req.params.userId, apiKey, appId);
+    const result = await sessionManager.rescanMessages(req.params.userId, null, appId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -125,23 +124,14 @@ app.get('/session/verify/:userId', async (req, res) => {
 
 // Standalone API diagnostic — tests the Base44 SDK connection without needing an active WhatsApp session
 app.get('/debug/api-test/:userId', async (req, res) => {
-  const apiKey = process.env.BASE44_API_KEY;
-  const appId = process.env.BASE44_APP_ID;
   const userId = req.params.userId;
-  const result = { apiKey: !!apiKey, appId, userId, rawFiltered: null, rawAll: null, rawApiError: null };
-  if (!apiKey || !appId) {
-    return res.json({ ...result, error: 'BASE44_API_KEY or BASE44_APP_ID not set' });
-  }
   try {
     const base44Api = require('./base44Api');
-    const filtered = await base44Api.getConnectedGroups(userId, apiKey, appId);
-    result.rawFiltered = { count: filtered.length, sample: filtered.length > 0 ? { id: filtered[0].id, name: filtered[0].group_name, user_id: filtered[0].user_id } : null };
-    const all = await base44Api.listAllConnectedGroups(apiKey, appId);
-    result.rawAll = { count: all.length, sample: all.length > 0 ? { id: all[0].id, name: all[0].group_name, user_id: all[0].user_id } : null };
-  } catch (rawErr) {
-    result.rawApiError = { message: rawErr.message };
+    const result = await base44Api.runApiDiagnostic(userId);
+    res.json(result);
+  } catch (err) {
+    res.json({ authError: err.message, userId });
   }
-  res.json(result);
 });
 
 // Full diagnostics — library version, Chromium, session event log
@@ -180,11 +170,11 @@ const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`GiveAway Radar server running on port ${PORT}`);
   // Auto-reconnect WhatsApp sessions that were previously connected
-  const apiKey = process.env.BASE44_API_KEY;
+  const hasAuth = process.env.BASE44_USER_EMAIL && process.env.BASE44_USER_PASSWORD;
   const appId = process.env.BASE44_APP_ID;
-  if (apiKey && appId) {
-    setTimeout(() => sessionManager.autoReconnect(apiKey, appId), 3000);
+  if (hasAuth && appId) {
+    setTimeout(() => sessionManager.autoReconnect(null, appId), 3000);
   } else {
-    console.log('Auto-reconnect skipped: BASE44_API_KEY or BASE44_APP_ID not set');
+    console.log('Auto-reconnect skipped: BASE44_USER_EMAIL, BASE44_USER_PASSWORD, or BASE44_APP_ID not set');
   }
 });
