@@ -123,6 +123,32 @@ app.get('/session/verify/:userId', async (req, res) => {
   }
 });
 
+// Standalone API diagnostic — tests the Base44 API connection without needing an active WhatsApp session
+app.get('/debug/api-test/:userId', async (req, res) => {
+  const apiKey = process.env.BASE44_API_KEY;
+  const appId = process.env.BASE44_APP_ID;
+  const userId = req.params.userId;
+  const result = { apiKey: !!apiKey, appId, userId, rawFiltered: null, rawAll: null, rawApiError: null };
+  if (!apiKey || !appId) {
+    return res.json({ ...result, error: 'BASE44_API_KEY or BASE44_APP_ID not set' });
+  }
+  try {
+    const axios = require('axios');
+    const BASE_URL = 'https://api.base44.com/api/apps';
+    const headers = { 'api-key': apiKey, 'Content-Type': 'application/json' };
+    // 1. Filtered query (what the server normally does)
+    const filterParams = `?filter=${encodeURIComponent(JSON.stringify({ user_id: userId }))}`;
+    const rawFiltered = await axios.get(`${BASE_URL}/${appId}/entities/ConnectedGroup${filterParams}`, { headers });
+    result.rawFiltered = { status: rawFiltered.status, count: Array.isArray(rawFiltered.data) ? rawFiltered.data.length : 'not_array', data: rawFiltered.data };
+    // 2. No filter — should return everything the API key can see
+    const rawAll = await axios.get(`${BASE_URL}/${appId}/entities/ConnectedGroup`, { headers });
+    result.rawAll = { status: rawAll.status, count: Array.isArray(rawAll.data) ? rawAll.data.length : 'not_array', data: rawAll.data };
+  } catch (rawErr) {
+    result.rawApiError = { status: rawErr.response?.status, data: rawErr.response?.data, message: rawErr.message };
+  }
+  res.json(result);
+});
+
 // Full diagnostics — library version, Chromium, session event log
 app.get('/session/diagnostics/:userId', (req, res) => {
   try {
