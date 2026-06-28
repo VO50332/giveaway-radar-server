@@ -74,6 +74,11 @@ function clearSessionFiles(userId) {
 
 async function startSession(userId, apiKey, appId, emit, opts = {}) {
   const freshStart = opts.freshStart === true;
+  const authToken = opts.authToken;
+  if (authToken) {
+    base44Api.setUserToken(userId, authToken);
+    console.log(`[${userId}] Auth token stored from frontend`);
+  }
 
   // If session already exists and is connected, return
   if (sessions.has(userId)) {
@@ -283,7 +288,7 @@ async function processMessage(userId, apiKey, appId, client, msg, emit) {
 
   // Populate group_id if missing — future rescans can use getChatById() instead of getChats()
   if (!matchedGroup.group_id || matchedGroup.group_id !== chat.id._serialized) {
-    await base44Api.updateConnectedGroup(apiKey, appId, matchedGroup.id, { group_id: chat.id._serialized });
+    await base44Api.updateConnectedGroup(userId, apiKey, appId, matchedGroup.id, { group_id: chat.id._serialized });
   }
 
   await base44Api.createGroupMessage(userId, apiKey, appId, {
@@ -341,10 +346,44 @@ async function processMessage(userId, apiKey, appId, client, msg, emit) {
   }
 }
 
+async function syncGroupIds(userId, client, apiKey, appId) {
+  const sess = sessions.get(userId);
+  let groups = sess?.groups;
+  if (!groups || groups.length === 0) {
+    try {
+      const chats = await Promise.race([
+        client.getChats(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
+      ]).catch(() => []);
+      groups = chats.filter ? chats.filter(c => c.isGroup) : [];
+      if (sess) sess.groups = groups;
+    } catch {
+      groups = [];
+    }
+  }
+  if (!groups || groups.length === 0) {
+    console.log(`[${userId}] syncGroupIds: no WhatsApp groups available`);
+    return await base44Api.getConnectedGroups(userId, apiKey, appId);
+  }
+
+  const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
+  let updated = 0;
+  for (const mg of monitoredGroups) {
+    const match = groups.find(g => g.name?.trim() === mg.group_name?.trim());
+    if (match && (!mg.group_id || mg.group_id !== match.id._serialized)) {
+      await base44Api.updateConnectedGroup(userId, apiKey, appId, mg.id, { group_id: match.id._serialized });
+      mg.group_id = match.id._serialized;
+      updated++;
+    }
+  }
+  console.log(`[${userId}] syncGroupIds: ${updated}/${monitoredGroups.length} groups updated`);
+  return monitoredGroups;
+}
+
 async function scanRecentMessages(userId, client, apiKey, appId, emit) {
   const sess = sessions.get(userId);
   try {
-    const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
+    const monitoredGroups = await syncGroupIds(userId, client, apiKey, appId);
     const activeGroups = monitoredGroups.filter(g => g.is_active);
     console.log(`[${userId}] Scanning recent messages in ${activeGroups.length} active groups`);
     if (sess) { sess.eventLog = sess.eventLog || []; sess.eventLog.push({ type: 'scan_start', data: { activeGroups: activeGroups.length, groupNames: activeGroups.map(g => g.group_name) }, ts: Date.now() }); }
@@ -459,16 +498,16 @@ async function rescanMessages(userId, apiKey, appId) {
   if (session.status !== 'connected') return { error: 'not_connected', status: session.status };
   let scanned = 0;
   let skipped = 0;
-  const debug = { hasEmail: !!process.env.BASE44_USER_EMAIL, hasPassword: !!process.env.BASE44_USER_PASSWORD, hasAppId: !!appId, appIdValue: appId, userId };
+  const debug = { hasToken: true, hasAppId: !!appId, appIdValue: appId, userId };
   // Diagnostic via SDK
   try {
-    const allGroups = await base44Api.listAllConnectedGroups();
+    const allGroups = await base44Api.listAllConnectedGroups(userId);
     debug.rawAll = { count: allGroups.length, sample: allGroups.length > 0 ? { id: allGroups[0].id, name: allGroups[0].group_name, user_id: allGroups[0].user_id } : null };
   } catch (rawErr) {
     debug.rawApiError = { message: rawErr.message };
   }
   try {
-    const monitoredGroups = await base44Api.getConnectedGroups(userId);
+    const monitoredGroups = await syncGroupIds(userId, session.client, apiKey, appId);
     console.log(`[${userId}] Rescan: getConnectedGroups returned ${monitoredGroups.length} groups, appId=${appId}`);
     debug.groupsReturned = monitoredGroups.length;
     if (session.eventLog) { session.eventLog.push({ type: 'rescan_groups_loaded', data: { total: monitoredGroups.length, names: monitoredGroups.map(g => g.group_name) }, ts: Date.now() }); }
@@ -531,24 +570,32 @@ async function getGroups(userId) {
 // Called on server startup to restore connections after redeploy
 // If session_data exists, restore from it; otherwise start fresh (new QR)
 async function autoReconnect(apiKey, appId) {
-  try {
-    const connectedSessions = await base44Api.listWhatsAppSessions(apiKey, appId, { status: 'connected' });
+  // On server restart, we don't have user tokens (they're stored in memory).
+  // Sessions are restored when users open the app and send their token via /session/refresh-token.
+  console.log('[autoReconnect] Skipped — waiting for auth tokens from the app');
+}
 
-    for (const sess of connectedSessions) {
-      if (!sess.user_id) continue;
-      if (sess.session_data) {
-        console.log(`[autoReconnect] Restoring session for user ${sess.user_id} from saved data`);
-      } else {
-        console.log(`[autoReconnect] No session_data for user ${sess.user_id} — starting fresh (will generate QR)`);
-        await base44Api.updateSession(sess.user_id, apiKey, appId, { status: 'pending_qr', qr_code: null });
-      }
-      startSession(sess.user_id, apiKey, appId, () => {}).catch(err => {
-        console.error(`[autoReconnect] Failed for ${sess.user_id}:`, err.message);
-      });
+// Called when a user's token arrives from the frontend — restores their WhatsApp session
+async function reconnectWithToken(userId, authToken, appId) {
+  try {
+    base44Api.setUserToken(userId, authToken);
+    const dbSession = await base44Api.getWhatsAppSession(userId);
+    if (!dbSession) {
+      console.log(`[reconnectWithToken] No session in DB for user ${userId}`);
+      return { status: 'no_session' };
     }
+    if (sessions.has(userId) && sessions.get(userId).status === 'connected') {
+      return { status: 'already_connected' };
+    }
+    if (dbSession.status === 'connected' || dbSession.session_data) {
+      console.log(`[reconnectWithToken] Restoring WhatsApp session for user ${userId}`);
+      return await startSession(userId, null, appId, () => {});
+    }
+    return { status: dbSession.status };
   } catch (err) {
-    console.error('[autoReconnect] error:', err.message);
+    console.error(`[reconnectWithToken] error for ${userId}:`, err.message);
+    return { error: err.message };
   }
 }
 
-module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, verifyConnection, getDiagnostics, rescanMessages, getGroups };
+module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, reconnectWithToken, verifyConnection, getDiagnostics, rescanMessages, getGroups };
