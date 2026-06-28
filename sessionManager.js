@@ -539,10 +539,12 @@ async function rescanMessages(userId, apiKey, appId) {
     console.log(`[${userId}] Rescan: ${activeGroups.length} active groups`);
     if (session.eventLog) { session.eventLog.push({ type: 'rescan_start', data: { activeGroups: activeGroups.length, names: activeGroups.map(g => g.group_name) }, ts: Date.now() }); }
 
+    debug.rescanGroups = [];
     for (const group of activeGroups) {
       if (!group.group_id) {
         console.log(`[${userId}] Rescan: "${group.group_name}" has no group_id — skipping`);
         skipped++;
+        debug.rescanGroups.push({ name: group.group_name, skipped: true, reason: 'no_group_id' });
         continue;
       }
       try {
@@ -551,16 +553,21 @@ async function rescanMessages(userId, apiKey, appId) {
           new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
         ]);
         const messages = await chat.fetchMessages({ limit: 50 });
-        console.log(`[${userId}] Rescan: ${messages.length} msgs in "${group.group_name}"`);
-        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
+        const msgCount = messages.length;
+        console.log(`[${userId}] Rescan: ${msgCount} msgs in "${group.group_name}"`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: msgCount }, ts: Date.now() }); }
+        let processed = 0;
         for (const msg of messages) {
           if (!msg.body) continue;
           await processMessage(userId, apiKey, appId, session.client, msg, () => {});
           scanned++;
+          processed++;
         }
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, totalMsgs: msgCount, processed, scanned });
       } catch (err) {
         console.log(`[${userId}] Rescan: getChatById failed for "${group.group_name}": ${err.message}`);
         if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
       }
     }
     console.log(`[${userId}] Rescan complete: ${scanned} messages processed, ${skipped} groups skipped (no group_id)`);
