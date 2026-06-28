@@ -8,12 +8,13 @@
     "dev": "nodemon index.js"
   },
   "dependencies": {
+    "@base44/sdk": "^0.8.34",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "qrcode": "^1.5.3",
     "socket.io": "^4.7.2",
-    "whatsapp-web.js": "^1.23.0"
+    "whatsapp-web.js": "^1.34.7"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
