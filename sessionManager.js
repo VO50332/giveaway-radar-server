@@ -467,6 +467,19 @@ async function rescanMessages(userId, apiKey, appId) {
   let scanned = 0;
   let skipped = 0;
   const debug = { hasApiKey: !!apiKey, hasAppId: !!appId, appIdValue: appId, userId };
+  // Diagnostic: make raw API calls to see what the Base44 API actually returns
+  try {
+    const axios = require('axios');
+    const BASE_URL = 'https://api.base44.com/api/apps';
+    const headers = { 'api-key': apiKey, 'Content-Type': 'application/json' };
+    const filterParams = `?filter=${encodeURIComponent(JSON.stringify({ user_id: userId }))}`;
+    const rawFiltered = await axios.get(`${BASE_URL}/${appId}/entities/ConnectedGroup${filterParams}`, { headers });
+    const rawAll = await axios.get(`${BASE_URL}/${appId}/entities/ConnectedGroup`, { headers });
+    debug.rawFiltered = { status: rawFiltered.status, count: Array.isArray(rawFiltered.data) ? rawFiltered.data.length : 'not_array', sample: Array.isArray(rawFiltered.data) && rawFiltered.data.length > 0 ? { id: rawFiltered.data[0].id, name: rawFiltered.data[0].group_name, user_id: rawFiltered.data[0].user_id } : null };
+    debug.rawAll = { status: rawAll.status, count: Array.isArray(rawAll.data) ? rawAll.data.length : 'not_array', sample: Array.isArray(rawAll.data) && rawAll.data.length > 0 ? { id: rawAll.data[0].id, name: rawAll.data[0].group_name, user_id: rawAll.data[0].user_id } : null };
+  } catch (rawErr) {
+    debug.rawApiError = { status: rawErr.response?.status, data: rawErr.response?.data, message: rawErr.message };
+  }
   try {
     const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
     console.log(`[${userId}] Rescan: getConnectedGroups returned ${monitoredGroups.length} groups, apiKey=${!!apiKey}, appId=${appId}`);
