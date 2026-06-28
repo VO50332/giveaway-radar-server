@@ -25,28 +25,22 @@ app.get('/health', (req, res) => res.json({ status: 'ok', sessions: sessionManag
 app.post('/session/start', async (req, res) => {
   const { userId } = req.body;
   const effectiveAppId = req.body.appId || process.env.BASE44_APP_ID;
-  const hasAuth = process.env.BASE44_USER_EMAIL && process.env.BASE44_USER_PASSWORD;
-  if (!userId || !hasAuth || !effectiveAppId) {
+  if (!userId || !effectiveAppId) {
     return res.status(400).json({
       error: 'Missing credentials',
-      details: {
-        userId: !!userId,
-        hasEmail: !!process.env.BASE44_USER_EMAIL,
-        hasPassword: !!process.env.BASE44_USER_PASSWORD,
-        appId: !!effectiveAppId,
-        hint: hasAuth ? undefined : 'Set BASE44_USER_EMAIL and BASE44_USER_PASSWORD env vars on Railway',
-      }
+      details: { userId: !!userId, appId: !!effectiveAppId },
     });
   }
 
   try {
     const freshStart = req.body.freshStart === true;
+    const authToken = req.body.authToken;
     const result = await sessionManager.startSession(
       userId,
       null,
       effectiveAppId,
       (event, data) => { io.to(`user:${userId}`).emit(event, data); },
-      { freshStart }
+      { freshStart, authToken }
     );
     res.json(result);
   } catch (err) {
@@ -63,12 +57,13 @@ app.post('/session/fresh-start', async (req, res) => {
   }
   try {
     await sessionManager.disconnectSession(userId);
+    const authToken = req.body.authToken;
     const result = await sessionManager.startSession(
       userId,
       null,
       effectiveAppId,
       (event, data) => { io.to(`user:${userId}`).emit(event, data); },
-      { freshStart: true }
+      { freshStart: true, authToken }
     );
     res.json(result);
   } catch (err) {
@@ -84,6 +79,21 @@ app.post('/session/disconnect', async (req, res) => {
   res.json({ success: true });
 });
 
+// Refresh auth token from frontend (called automatically on page load)
+app.post('/session/refresh-token', async (req, res) => {
+  const { userId, authToken } = req.body;
+  const appId = req.body.appId || process.env.BASE44_APP_ID;
+  if (!userId || !authToken) {
+    return res.status(400).json({ error: 'userId and authToken required' });
+  }
+  try {
+    const result = await sessionManager.reconnectWithToken(userId, authToken, appId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get session status
 app.get('/session/status/:userId', (req, res) => {
   const status = sessionManager.getStatus(req.params.userId);
@@ -95,6 +105,10 @@ app.post('/session/rescan/:userId', async (req, res) => {
   const appId = req.body.appId || process.env.BASE44_APP_ID;
   if (!appId) return res.status(400).json({ error: 'Missing appId' });
   try {
+    const authToken = req.body.authToken;
+    if (authToken) {
+      require('./base44Api').setUserToken(req.params.userId, authToken);
+    }
     const result = await sessionManager.rescanMessages(req.params.userId, null, appId);
     res.json(result);
   } catch (err) {
@@ -123,11 +137,12 @@ app.get('/session/verify/:userId', async (req, res) => {
 });
 
 // Standalone API diagnostic — tests the Base44 SDK connection without needing an active WhatsApp session
-app.get('/debug/api-test/:userId', async (req, res) => {
+app.post('/debug/api-test/:userId', async (req, res) => {
   const userId = req.params.userId;
+  const authToken = req.body.authToken;
   try {
     const base44Api = require('./base44Api');
-    const result = await base44Api.runApiDiagnostic(userId);
+    const result = await base44Api.runApiDiagnostic(userId, authToken);
     res.json(result);
   } catch (err) {
     res.json({ authError: err.message, userId });
@@ -170,11 +185,6 @@ const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`GiveAway Radar server running on port ${PORT}`);
   // Auto-reconnect WhatsApp sessions that were previously connected
-  const hasAuth = process.env.BASE44_USER_EMAIL && process.env.BASE44_USER_PASSWORD;
   const appId = process.env.BASE44_APP_ID;
-  if (hasAuth && appId) {
-    setTimeout(() => sessionManager.autoReconnect(null, appId), 3000);
-  } else {
-    console.log('Auto-reconnect skipped: BASE44_USER_EMAIL, BASE44_USER_PASSWORD, or BASE44_APP_ID not set');
-  }
+  console.log(`Server ready. Waiting for auth tokens from the app (appId=${appId ? 'set' : 'MISSING'}).`);
 });
