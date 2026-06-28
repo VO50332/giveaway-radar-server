@@ -459,17 +459,17 @@ async function rescanMessages(userId, apiKey, appId) {
   if (session.status !== 'connected') return { error: 'not_connected', status: session.status };
   let scanned = 0;
   let skipped = 0;
-  const debug = { hasApiKey: !!apiKey, hasAppId: !!appId, appIdValue: appId, userId };
+  const debug = { hasEmail: !!process.env.BASE44_USER_EMAIL, hasPassword: !!process.env.BASE44_USER_PASSWORD, hasAppId: !!appId, appIdValue: appId, userId };
   // Diagnostic via SDK
   try {
-    const allGroups = await base44Api.listAllConnectedGroups(apiKey, appId);
+    const allGroups = await base44Api.listAllConnectedGroups();
     debug.rawAll = { count: allGroups.length, sample: allGroups.length > 0 ? { id: allGroups[0].id, name: allGroups[0].group_name, user_id: allGroups[0].user_id } : null };
   } catch (rawErr) {
     debug.rawApiError = { message: rawErr.message };
   }
   try {
-    const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
-    console.log(`[${userId}] Rescan: getConnectedGroups returned ${monitoredGroups.length} groups, apiKey=${!!apiKey}, appId=${appId}`);
+    const monitoredGroups = await base44Api.getConnectedGroups(userId);
+    console.log(`[${userId}] Rescan: getConnectedGroups returned ${monitoredGroups.length} groups, appId=${appId}`);
     debug.groupsReturned = monitoredGroups.length;
     if (session.eventLog) { session.eventLog.push({ type: 'rescan_groups_loaded', data: { total: monitoredGroups.length, names: monitoredGroups.map(g => g.group_name) }, ts: Date.now() }); }
     const activeGroups = monitoredGroups.filter(g => g.is_active);
