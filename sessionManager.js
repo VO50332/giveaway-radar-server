@@ -274,8 +274,8 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
   return { status: 'initializing' };
 }
 
-async function processMessage(userId, apiKey, appId, client, msg, emit) {
-  const chat = await msg.getChat();
+async function processMessage(userId, apiKey, appId, client, msg, emit, existingChat) {
+  const chat = existingChat || await msg.getChat();
   if (!chat.isGroup) return;
 
   const groupName = chat.name;
@@ -430,7 +430,7 @@ async function scanRecentMessages(userId, client, apiKey, appId, emit) {
         if (sess) { sess.eventLog.push({ type: 'scan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
         for (const msg of messages) {
           if (!msg.body) continue;
-          await processMessage(userId, apiKey, appId, client, msg, emit);
+          await processMessage(userId, apiKey, appId, client, msg, emit, chat);
         }
       } catch (err) {
         console.log(`[${userId}] getChatById failed for "${group.group_name}": ${err.message}`);
@@ -559,7 +559,7 @@ async function rescanMessages(userId, apiKey, appId) {
         let processed = 0;
         for (const msg of messages) {
           if (!msg.body) continue;
-          await processMessage(userId, apiKey, appId, session.client, msg, () => {});
+          await processMessage(userId, apiKey, appId, session.client, msg, () => {}, chat);
           scanned++;
           processed++;
         }
