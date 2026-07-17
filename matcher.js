@@ -1,8 +1,9 @@
 /* eslint-env node */
+/* eslint-disable no-undef */
 // Availability emojis/words that indicate an item is still available
 const AVAILABLE_SIGNALS = ['✅', '🟢', '🆓', 'free', 'available', 'פנוי', 'פנויה', 'חינם', 'זמין'];
 // Signals that indicate item is taken
-const TAKEN_SIGNALS = ['❌', '🔴', 'taken', 'sold', 'gone', 'נלקח', 'נתפס', 'נמכר', 'אזל'];
+const TAKEN_SIGNALS = ['💾', '❌', '🔴', 'taken', 'sold', 'gone', 'נלקח', 'נתפס', 'נמכר', 'אזל'];
 
 /**
  * Check if a message matches any of the keywords
