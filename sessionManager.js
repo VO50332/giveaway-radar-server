@@ -623,6 +623,18 @@ async function rescanMessages(userId, apiKey, appId) {
         debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
       }
     }
+    // Auto-recover: if every group with a group_id timed out, the client is functionally dead
+    const groupsWithId = (debug.rescanGroups || []).filter(g => g.group_id);
+    const allTimedOut = groupsWithId.length > 0 && groupsWithId.every(g => g.error && g.error.includes('timeout'));
+    if (allTimedOut && scanned === 0) {
+      console.log(`[${userId}] All ${groupsWithId.length} groups timed out — session is functionally dead, forcing fresh restart`);
+      if (session.eventLog) { session.eventLog.push({ type: 'dead_session_recover', data: { groups: groupsWithId.length }, ts: Date.now() }); }
+      try { await session.client?.destroy(); } catch (_) {}
+      sessions.delete(userId);
+      startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+      return { reconnecting: true, message: `WhatsApp connection is dead (all ${groupsWithId.length} groups timed out). Restarting fresh — wait ~30s then try again.`, debug };
+    }
+
     console.log(`[${userId}] Rescan complete: ${scanned} messages processed, ${skipped} groups skipped (no group_id)`);
     return { scanned, skipped, totalGroups: monitoredGroups.length, activeGroups: activeGroups.length, debug };
   } catch (err) {
