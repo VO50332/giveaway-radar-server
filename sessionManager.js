@@ -127,7 +127,7 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     },
   });
 
-  sessions.set(userId, { client, status: 'initializing', apiKey, appId, eventLog: [] });
+  sessions.set(userId, { client, status: 'initializing', apiKey, appId, eventLog: [], initStartedAt: Date.now() });
 
   // Helper: log + emit an event for diagnostics
   function logEvent(userId, type, data = {}) {
@@ -560,7 +560,19 @@ async function verifyConnection(userId) {
 async function rescanMessages(userId, apiKey, appId) {
   if (!sessions.has(userId)) return { error: 'no_active_session' };
   const session = sessions.get(userId);
-  if (session.status !== 'connected') return { error: 'not_connected', status: session.status };
+  if (session.status !== 'connected') {
+    // Auto-recover: if stuck initializing/restoring for > 60s, force a fresh restart
+    const stuckMs = session.initStartedAt ? Date.now() - session.initStartedAt : 0;
+    if ((session.status === 'initializing' || session.status === 'restoring') && stuckMs > 60000) {
+      console.log(`[${userId}] Rescan: session stuck in ${session.status} for ${Math.round(stuckMs / 1000)}s — forcing fresh restart`);
+      try { await session.client?.destroy(); } catch (_) {}
+      sessions.delete(userId);
+      // Start fresh in the background (token already set by the endpoint)
+      startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+      return { reconnecting: true, message: `Session was stuck (${session.status} for ${Math.round(stuckMs / 1000)}s). Restarting fresh — wait ~30s then try again.` };
+    }
+    return { error: 'not_connected', status: session.status };
+  }
   let scanned = 0;
   let skipped = 0;
   const debug = { hasToken: true, hasAppId: !!appId, appIdValue: appId, userId };
