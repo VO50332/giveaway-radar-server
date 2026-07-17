@@ -109,7 +109,7 @@ app.post('/session/rescan/:userId', async (req, res) => {
     if (authToken) {
       require('./base44Api').setUserToken(req.params.userId, authToken);
     }
-    const result = await sessionManager.rescanMessages(req.params.userId, null, appId);
+    const result = await sessionManager.rescanMessages(req.params.userId, authToken, appId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
