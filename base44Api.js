@@ -109,6 +109,15 @@ async function createMatch(userId, _apiKey, _appId, data) {
   }
 }
 
+async function updateMatch(userId, _apiKey, _appId, matchId, updates) {
+  try {
+    const client = await getClient(userId);
+    return await client.entities.Match.update(matchId, updates);
+  } catch (err) {
+    console.error('updateMatch error:', err.message);
+  }
+}
+
 async function createNotification(userId, _apiKey, _appId, data) {
   try {
     const client = await getClient(userId);
@@ -124,6 +133,21 @@ async function updateConnectedGroup(userId, _apiKey, _appId, groupId, updates) {
     return await client.entities.ConnectedGroup.update(groupId, updates);
   } catch (err) {
     console.error('updateConnectedGroup error:', err.message);
+  }
+}
+
+async function findExistingMatch(userId, messageId, wishlistItemId) {
+  try {
+    const client = await getClient(userId);
+    const existing = await client.entities.Match.filter({
+      user_id: userId,
+      message_id: messageId,
+      wishlist_item_id: wishlistItemId,
+    });
+    return existing.length > 0 ? existing[0] : null;
+  } catch (err) {
+    console.error('findExistingMatch error:', err.message);
+    return null;
   }
 }
 
@@ -154,6 +178,19 @@ async function getWhatsAppSession(userId) {
     return sessions[0] || null;
   } catch (err) {
     console.error('getWhatsAppSession error:', err.message);
+    return null;
+  }
+}
+
+async function uploadMedia(userId, base64Data, mimetype, filename) {
+  try {
+    const client = await getClient(userId);
+    const buffer = Buffer.from(base64Data, 'base64');
+    const file = new Blob([buffer], { type: mimetype || 'image/jpeg' });
+    const result = await client.integrations.Core.UploadFile({ file, filename });
+    return result.file_url || null;
+  } catch (err) {
+    console.error('uploadMedia error:', err.message);
     return null;
   }
 }
@@ -210,8 +247,11 @@ module.exports = {
   createNotification,
   getUserPhone,
   updateConnectedGroup,
+  findExistingMatch,
+  updateMatch,
   listWhatsAppSessions,
   getWhatsAppSession,
   listAllConnectedGroups,
   runApiDiagnostic,
+  uploadMedia,
 };
