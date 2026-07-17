@@ -281,10 +281,29 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
   const groupName = chat.name;
   const content = msg.body || '';
   const sender = msg.author || msg.from;
+  // In groups, msg.author is the sender's phone (e.g. "972501234567@c.us")
+  const senderNumber = msg.author ? msg.author.replace('@c.us', '').replace('@g.us', '') : null;
 
   const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
   const matchedGroup = monitoredGroups.find(g => g.group_name.trim() === groupName.trim() && g.is_active);
   if (!matchedGroup) return;
+
+  // Download attached image (if any) and upload to storage so it can be shown in the UI
+  let imageUrl = null;
+  if (msg.hasMedia) {
+    try {
+      const media = await Promise.race([
+        msg.downloadMedia(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('media_download_timeout_30s')), 30000)),
+      ]);
+      if (media && media.data && (media.mimetype || '').startsWith('image/')) {
+        imageUrl = await base44Api.uploadMedia(userId, media.data, media.mimetype, media.filename || 'image.jpg');
+      }
+    } catch (err) {
+      console.error(`[${userId}] Media download failed:`, err.message);
+      emit('log', { type: 'media_download_failed', data: { error: err.message } });
+    }
+  }
 
   // Populate group_id if missing — future rescans can use getChatById() instead of getChats()
   if (!matchedGroup.group_id || matchedGroup.group_id !== chat.id._serialized) {
@@ -298,6 +317,8 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
     message_id: msg.id._serialized,
     sender_name: sender,
     content,
+    image_url: imageUrl,
+    has_image: !!imageUrl,
     received_at: new Date(msg.timestamp * 1000).toISOString(),
   });
 
@@ -308,15 +329,24 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
     const matchResult = matcher.checkMatch(content, item.keywords);
     if (!matchResult.matched) continue;
 
+    // Skip if we already matched this message for this wishlist item
+    if (msg.id?._serialized) {
+      const existing = await base44Api.findExistingMatch(userId, msg.id._serialized, item.id);
+      if (existing) continue;
+    }
+
     const availabilityStatus = matcher.detectAvailability(content);
 
     const match = await base44Api.createMatch(userId, apiKey, appId, {
       user_id: userId,
       wishlist_item_id: item.id,
+      message_id: msg.id?._serialized || null,
       wishlist_item_title: item.title,
       group_name: groupName,
       sender_name: sender,
+      sender_number: senderNumber,
       message_content: content,
+      image_url: imageUrl,
       matched_keywords: matchResult.keywords,
       availability_status: availabilityStatus,
       notification_sent: false,
@@ -325,24 +355,35 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
 
     emit('match', { match, item });
 
+    // Don't notify about items already marked as taken
+    if (availabilityStatus === 'taken') continue;
+
+    let notifStatus = 'pending';
     if (item.notify_via_whatsapp) {
       const userPhone = await base44Api.getUserPhone(userId, apiKey, appId);
       if (userPhone) {
-        const notifMsg = `🎯 *GiveAway Match!*\n\n*Item:* ${item.title}\n*Group:* ${groupName}\n*Message:* ${content.slice(0, 200)}\n*Status:* ${availabilityStatus === 'available' ? '✅ Available' : availabilityStatus === 'taken' ? '❌ Taken' : '❓ Unknown'}`;
-        await client.sendMessage(`${userPhone}@c.us`, notifMsg);
+        const notifMsg = `🎯 *GiveAway Match!*\n\n*Item:* ${item.title}\n*Group:* ${groupName}\n*From:* ${senderNumber || sender}\n*Message:* ${content.slice(0, 200)}\n*Status:* ${availabilityStatus === 'available' ? '✅ Available' : '❓ Unknown'}`;
+        try {
+          await client.sendMessage(`${userPhone}@c.us`, notifMsg);
+          notifStatus = 'sent';
+          await base44Api.updateMatch(userId, apiKey, appId, match.id, { notification_sent: true });
+        } catch (sendErr) {
+          console.error(`[${userId}] WhatsApp send failed:`, sendErr.message);
+          notifStatus = 'failed';
+        }
       }
-
-      await base44Api.createNotification(userId, apiKey, appId, {
-        user_id: userId,
-        match_id: match.id,
-        wishlist_item_title: item.title,
-        group_name: groupName,
-        message_preview: content.slice(0, 150),
-        channel: 'whatsapp',
-        status: 'sent',
-        sent_at: new Date().toISOString(),
-      });
     }
+
+    await base44Api.createNotification(userId, apiKey, appId, {
+      user_id: userId,
+      match_id: match.id,
+      wishlist_item_title: item.title,
+      group_name: groupName,
+      message_preview: content.slice(0, 150),
+      channel: item.notify_via_whatsapp ? 'whatsapp' : 'in_app',
+      status: notifStatus,
+      sent_at: new Date().toISOString(),
+    });
   }
 }
 
@@ -425,11 +466,11 @@ async function scanRecentMessages(userId, client, apiKey, appId, emit) {
           new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
         ]);
         if (!chat) continue;
-        const messages = await chat.fetchMessages({ limit: 50 });
+        const messages = await chat.fetchMessages({ limit: 100 });
         console.log(`[${userId}] Scanned ${messages.length} messages in "${group.group_name}"`);
         if (sess) { sess.eventLog.push({ type: 'scan_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() }); }
         for (const msg of messages) {
-          if (!msg.body) continue;
+          if (!msg.body && !msg.hasMedia) continue;
           await processMessage(userId, apiKey, appId, client, msg, emit, chat);
         }
       } catch (err) {
@@ -552,13 +593,13 @@ async function rescanMessages(userId, apiKey, appId) {
           session.client.getChatById(group.group_id),
           new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
         ]);
-        const messages = await chat.fetchMessages({ limit: 50 });
+        const messages = await chat.fetchMessages({ limit: 100 });
         const msgCount = messages.length;
         console.log(`[${userId}] Rescan: ${msgCount} msgs in "${group.group_name}"`);
         if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: msgCount }, ts: Date.now() }); }
         let processed = 0;
         for (const msg of messages) {
-          if (!msg.body) continue;
+          if (!msg.body && !msg.hasMedia) continue;
           await processMessage(userId, apiKey, appId, session.client, msg, () => {}, chat);
           scanned++;
           processed++;
