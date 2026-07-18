@@ -117,7 +117,7 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     webVersion: '2.3000.1032900857',
     webVersionCache: {
       type: 'remote',
-      path: './.wwebjs_cache',
+      remotePath: './.wwebjs_cache',
       strict: false,
     },
     puppeteer: {
