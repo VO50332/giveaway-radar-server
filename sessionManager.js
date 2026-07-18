@@ -583,7 +583,9 @@ async function rescanMessages(userId, apiKey, appId) {
       console.log(`[${userId}] Rescan: session stuck in ${session.status} for ${Math.round(stuckMs / 1000)}s — forcing fresh restart`);
       try { await session.client?.destroy(); } catch (_) {}
       sessions.delete(userId);
-      // Start fresh in the background (token already set by the endpoint)
+      clearSessionFiles(userId);
+      // Wait for Chromium to fully exit before starting a new instance
+      await new Promise(r => setTimeout(r, 3000));
       startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
       return { reconnecting: true, message: `Session was stuck (${session.status} for ${Math.round(stuckMs / 1000)}s). Restarting fresh — wait ~30s then try again.` };
     }
@@ -647,6 +649,9 @@ async function rescanMessages(userId, apiKey, appId) {
       if (session.eventLog) { session.eventLog.push({ type: 'dead_session_recover', data: { groups: groupsWithId.length }, ts: Date.now() }); }
       try { await session.client?.destroy(); } catch (_) {}
       sessions.delete(userId);
+      clearSessionFiles(userId);
+      // Wait for Chromium to fully exit before starting a new instance
+      await new Promise(r => setTimeout(r, 3000));
       startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
       return { reconnecting: true, message: `WhatsApp connection is dead (all ${groupsWithId.length} groups timed out). Restarting fresh — wait ~30s then try again.`, debug };
     }
