@@ -414,7 +414,9 @@ async function syncGroupIds(userId, client, apiKey, appId, debug = {}) {
         client.getChats(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
       ]).catch(err => {
-        debug.syncDebug.getChatsError = err.message;
+        const fullErr = err?.message || String(err?.stack || err);
+        console.error(`[${userId}] syncGroupIds getChats failed:`, fullErr);
+        debug.syncDebug.getChatsError = fullErr;
         return [];
       });
       groups = Array.isArray(chats) ? chats.filter(c => c.isGroup) : [];
@@ -594,6 +596,31 @@ async function rescanMessages(userId, apiKey, appId) {
   let scanned = 0;
   let skipped = 0;
   const debug = { hasToken: true, hasAppId: !!appId, appIdValue: appId, userId };
+
+  // Verify the WhatsApp client is actually alive before doing anything else.
+  // "ready" may have fired but the Chromium page can still be unresponsive.
+  try {
+    const state = await Promise.race([
+      session.client.getState(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getState_timeout_15s')), 15000)),
+    ]);
+    debug.connectionState = state;
+    console.log(`[${userId}] Rescan: client state = ${state}`);
+    if (session.eventLog) { session.eventLog.push({ type: 'rescan_state_check', data: { state }, ts: Date.now() }); }
+  } catch (stateErr) {
+    const fullErr = stateErr?.message || String(stateErr);
+    debug.connectionState = `ERROR: ${fullErr}`;
+    console.error(`[${userId}] Rescan: getState failed — session is dead: ${fullErr}`);
+    if (session.eventLog) { session.eventLog.push({ type: 'rescan_state_failed', data: { error: fullErr }, ts: Date.now() }); }
+    // Session is dead — restart fresh immediately
+    try { await session.client?.destroy(); } catch (_) {}
+    sessions.delete(userId);
+    clearSessionFiles(userId);
+    await new Promise(r => setTimeout(r, 3000));
+    startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+    return { reconnecting: true, message: `WhatsApp client is unresponsive (getState failed: ${fullErr.slice(0, 80)}). Restarting fresh — wait ~30s then try again.`, debug };
+  }
+
   // Diagnostic via SDK
   try {
     const allGroups = await base44Api.listAllConnectedGroups(userId);
