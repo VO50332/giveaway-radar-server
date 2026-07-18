@@ -118,7 +118,7 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     webVersionCache: {
       type: 'remote',
       path: './.wwebjs_cache',
-      strict: true,
+      strict: false,
     },
     puppeteer: {
       headless: true,
@@ -301,8 +301,9 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
 
   client.initialize().catch(err => {
     clearTimeout(initTimeout);
-    logEvent(userId, 'initialize_failed', { error: err.message });
-    console.error(`[${userId}] client.initialize() failed:`, err.message);
+    const fullErr = err?.stack || err?.message || String(err);
+    logEvent(userId, 'initialize_failed', { error: fullErr });
+    console.error(`[${userId}] client.initialize() failed:`, fullErr);
     base44Api.updateSession(userId, apiKey, appId, { status: 'disconnected' });
   });
   return { status: 'initializing' };
