@@ -215,30 +215,46 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     logEvent(userId, 'sync_wait_start', {});
     await new Promise(r => setTimeout(r, 20000));
 
-    // Try to load groups via getChats — but this often hangs on Railway, so don't retry aggressively
+    // Try to load groups via getChats — track whether it actually failed (vs empty)
+    let getChatsFailed = false;
     let chats = await Promise.race([
       client.getChats(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
     ]).catch(err => {
       logEvent(userId, 'getChats_failed', { error: err.message });
+      getChatsFailed = true;
       return [];
     });
     let groups = chats.filter(c => c.isGroup);
-    logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length });
+    logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length, failed: getChatsFailed });
 
     // Only retry once if getChats returned no groups
     if (groups.length === 0) {
-      logEvent(userId, 'groups_empty_retrying', {});
+      logEvent(userId, 'groups_empty_retrying', { failed: getChatsFailed });
       await new Promise(r => setTimeout(r, 30000));
+      getChatsFailed = false;
       chats = await Promise.race([
         client.getChats(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
       ]).catch(err => {
         logEvent(userId, 'getChats_retry_failed', { error: err.message });
+        getChatsFailed = true;
         return [];
       });
       groups = chats.filter(c => c.isGroup);
-      logEvent(userId, 'groups_retry', { count: groups.length });
+      logEvent(userId, 'groups_retry', { count: groups.length, failed: getChatsFailed });
+    }
+
+    // If getChats failed both times, the WhatsApp Web session is broken — restart fresh
+    if (getChatsFailed && groups.length === 0) {
+      logEvent(userId, 'session_broken_restart', { reason: 'getChats_failed_twice' });
+      session.status = 'disconnected';
+      await base44Api.updateSession(userId, apiKey, appId, { status: 'pending_qr', qr_code: null });
+      emit('disconnected', { reason: 'getChats_failed_restart' });
+      try { await client.destroy(); } catch (_) {}
+      sessions.delete(userId);
+      startSession(userId, apiKey, appId, emit, { freshStart: true });
+      return;
     }
 
     session.groups = groups;
