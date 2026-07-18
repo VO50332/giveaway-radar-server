@@ -72,6 +72,46 @@ function clearSessionFiles(userId) {
   }
 }
 
+// Check if WhatsApp Web's internal Store module is loaded in the Chromium page.
+// getState() can return "CONNECTED" even when Store is missing — getChats() will
+// then fail with a minified error ("r"). This is the true health check.
+async function checkStoreLoaded(client) {
+  try {
+    return await client.pupPage.evaluate(() => {
+      return !!(window.Store && window.Store.Chat);
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+// Capture what the page actually shows when Store is missing — URL, title, body text.
+async function diagnosePage(client) {
+  try {
+    const url = client.pupPage ? await client.pupPage.url() : 'no_page';
+    const title = client.pupPage ? await client.pupPage.title() : 'no_page';
+    const bodyText = client.pupPage
+      ? await client.pupPage.evaluate(() => document.body?.innerText?.slice(0, 600) || '')
+      : '';
+    return { url, title, bodyText };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// Wait up to timeoutMs for WhatsApp Web's Store module to load. Returns true if loaded.
+async function waitForStore(client, userId, timeoutMs = 90000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await checkStoreLoaded(client)) {
+      console.log(`[${userId}] Store loaded after ${Math.round((Date.now() - start) / 1000)}s`);
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 5000));
+  }
+  return false;
+}
+
 async function startSession(userId, apiKey, appId, emit, opts = {}) {
   const freshStart = opts.freshStart === true;
   const authToken = opts.authToken;
@@ -211,33 +251,53 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     // so session_data is saved even if getChats() hangs later
     await saveSessionToDb(userId, apiKey, appId);
 
-    // Wait for WhatsApp to sync chats — on fresh connections this takes 20-40s
-    logEvent(userId, 'sync_wait_start', {});
-    await new Promise(r => setTimeout(r, 20000));
+    // Wait for WhatsApp Web's Store module to load — this is the real readiness signal.
+    // getState() can return "CONNECTED" before Store exists, causing getChats() to fail.
+    logEvent(userId, 'store_wait_start', {});
+    const storeLoaded = await waitForStore(client, userId, 90000);
+    if (!storeLoaded) {
+      const diag = await diagnosePage(client);
+      logEvent(userId, 'store_missing', diag);
+      console.error(`[${userId}] Store never loaded after 90s — page is: ${JSON.stringify(diag)}`);
+      // Session is a zombie — restart fresh immediately
+      session.status = 'disconnected';
+      await base44Api.updateSession(userId, apiKey, appId, { status: 'pending_qr', qr_code: null });
+      emit('disconnected', { reason: 'store_missing' });
+      try { await client.destroy(); } catch (_) {}
+      sessions.delete(userId);
+      startSession(userId, apiKey, appId, emit, { freshStart: true });
+      return;
+    }
+    logEvent(userId, 'store_loaded', {});
 
-    // Try to load groups via getChats — track whether it actually failed (vs empty)
+    // Give Store a few extra seconds to populate chats
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Try to load groups via getChats — single attempt (Store is confirmed loaded)
     let getChatsFailed = false;
     let chats = await Promise.race([
       client.getChats(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
     ]).catch(err => {
-      logEvent(userId, 'getChats_failed', { error: err.message });
+      const fullErr = err?.stack || err?.message || String(err);
+      logEvent(userId, 'getChats_failed', { error: fullErr });
       getChatsFailed = true;
       return [];
     });
     let groups = chats.filter(c => c.isGroup);
     logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length, failed: getChatsFailed });
 
-    // Only retry once if getChats returned no groups
+    // Retry once if getChats returned no groups
     if (groups.length === 0) {
       logEvent(userId, 'groups_empty_retrying', { failed: getChatsFailed });
-      await new Promise(r => setTimeout(r, 30000));
+      await new Promise(r => setTimeout(r, 15000));
       getChatsFailed = false;
       chats = await Promise.race([
         client.getChats(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
       ]).catch(err => {
-        logEvent(userId, 'getChats_retry_failed', { error: err.message });
+        const fullErr = err?.stack || err?.message || String(err);
+        logEvent(userId, 'getChats_retry_failed', { error: fullErr });
         getChatsFailed = true;
         return [];
       });
@@ -607,6 +667,23 @@ async function rescanMessages(userId, apiKey, appId) {
     debug.connectionState = state;
     console.log(`[${userId}] Rescan: client state = ${state}`);
     if (session.eventLog) { session.eventLog.push({ type: 'rescan_state_check', data: { state }, ts: Date.now() }); }
+
+    // getState() can return CONNECTED even when Store is dead — verify Store too.
+    const storeOk = await checkStoreLoaded(session.client);
+    debug.storeLoaded = storeOk;
+    if (session.eventLog) { session.eventLog.push({ type: 'rescan_store_check', data: { storeOk }, ts: Date.now() }); }
+    if (!storeOk) {
+      const diag = await diagnosePage(session.client);
+      debug.pageDiagnostic = diag;
+      console.error(`[${userId}] Rescan: Store missing despite CONNECTED state — page: ${JSON.stringify(diag)}`);
+      if (session.eventLog) { session.eventLog.push({ type: 'rescan_store_missing', data: diag, ts: Date.now() }); }
+      try { await session.client?.destroy(); } catch (_) {}
+      sessions.delete(userId);
+      clearSessionFiles(userId);
+      await new Promise(r => setTimeout(r, 3000));
+      startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+      return { reconnecting: true, message: `WhatsApp Web modules not loaded (page: ${diag.url}). Restarting fresh — wait ~30s then try again.`, debug };
+    }
   } catch (stateErr) {
     const fullErr = stateErr?.message || String(stateErr);
     debug.connectionState = `ERROR: ${fullErr}`;
