@@ -641,19 +641,22 @@ async function rescanMessages(userId, apiKey, appId) {
         debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
       }
     }
-    // Auto-recover: if every group with a group_id timed out, the client is functionally dead
+    // Auto-recover: if every group with a group_id failed (timeout, target closed, etc.), the
+    // underlying Chromium page is dead even though the client thinks it's "connected". Force a
+    // fresh restart so the user gets a new QR to scan.
     const groupsWithId = (debug.rescanGroups || []).filter(g => g.group_id);
-    const allTimedOut = groupsWithId.length > 0 && groupsWithId.every(g => g.error && g.error.includes('timeout'));
-    if (allTimedOut && scanned === 0) {
-      console.log(`[${userId}] All ${groupsWithId.length} groups timed out — session is functionally dead, forcing fresh restart`);
-      if (session.eventLog) { session.eventLog.push({ type: 'dead_session_recover', data: { groups: groupsWithId.length }, ts: Date.now() }); }
+    const allFailed = groupsWithId.length > 0 && groupsWithId.every(g => g.error);
+    if (allFailed && scanned === 0) {
+      const errors = groupsWithId.map(g => g.error).join('; ');
+      console.log(`[${userId}] All ${groupsWithId.length} groups failed — session is functionally dead, forcing fresh restart. Errors: ${errors}`);
+      if (session.eventLog) { session.eventLog.push({ type: 'dead_session_recover', data: { groups: groupsWithId.length, errors }, ts: Date.now() }); }
       try { await session.client?.destroy(); } catch (_) {}
       sessions.delete(userId);
       clearSessionFiles(userId);
       // Wait for Chromium to fully exit before starting a new instance
       await new Promise(r => setTimeout(r, 3000));
       startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
-      return { reconnecting: true, message: `WhatsApp connection is dead (all ${groupsWithId.length} groups timed out). Restarting fresh — wait ~30s then try again.`, debug };
+      return { reconnecting: true, message: `WhatsApp connection is dead (all ${groupsWithId.length} groups failed: ${errors.slice(0, 100)}). Restarting fresh — wait ~30s then try again.`, debug };
     }
 
     console.log(`[${userId}] Rescan complete: ${scanned} messages processed, ${skipped} groups skipped (no group_id)`);
