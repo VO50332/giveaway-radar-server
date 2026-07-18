@@ -110,6 +110,16 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
 
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: DATA_DIR }),
+    // Pin WhatsApp Web version — the library's webpack-module injection breaks when
+    // WhatsApp auto-updates their bundle. 2.3000.1032900857 is the version v1.34.7 was
+    // tested against (per PR #5807). strict:true fails loudly if it can't be fetched,
+    // rather than silently falling back to a broken "latest".
+    webVersion: '2.3000.1032900857',
+    webVersionCache: {
+      type: 'remote',
+      path: './.wwebjs_cache',
+      strict: true,
+    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -189,7 +199,13 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     logEvent(userId, 'ready', {});
     emit('ready', { status: 'connected' });
     await base44Api.updateSession(userId, apiKey, appId, { status: 'connected', qr_code: null });
-    console.log(`[${userId}] WhatsApp connected`);
+    try {
+      const wv = await client.getWWebVersion();
+      logEvent(userId, 'wweb_version', { version: wv });
+      console.log(`[${userId}] WhatsApp connected (Web v${wv})`);
+    } catch (_) {
+      console.log(`[${userId}] WhatsApp connected`);
+    }
 
     // Re-verify after 10s — catches connections that drop right after ready
     setTimeout(async () => {
@@ -597,7 +613,8 @@ async function rescanMessages(userId, apiKey, appId) {
   }
   let scanned = 0;
   let skipped = 0;
-  const debug = { hasToken: true, hasAppId: !!appId, appIdValue: appId, userId };
+  const wwebEvent = (session.eventLog || []).find(e => e.type === 'wweb_version');
+  const debug = { hasToken: true, hasAppId: !!appId, appIdValue: appId, userId, wwebVersion: wwebEvent?.data?.version || null };
 
   // Verify the WhatsApp client is actually alive before doing anything else.
   // "ready" may have fired but the Chromium page can still be unresponsive.
