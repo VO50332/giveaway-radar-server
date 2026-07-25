@@ -749,7 +749,7 @@ async function rescanMessages(userId, apiKey, appId) {
       try {
         const chat = await Promise.race([
           session.client.getChatById(group.group_id),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_60s')), 60000)),
         ]);
         const messages = await chat.fetchMessages({ limit: 100 });
         const msgCount = messages.length;
@@ -769,13 +769,22 @@ async function rescanMessages(userId, apiKey, appId) {
         debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
       }
     }
-    // Auto-recover: if every group with a group_id failed (timeout, target closed, etc.), the
-    // underlying Chromium page is dead even though the client thinks it's "connected". Force a
-    // fresh restart so the user gets a new QR to scan.
+    // Auto-recover: if every group with a group_id failed, the underlying Chromium page
+    // is likely dead even though the client thinks it's "connected". BUT a getChatById
+    // timeout right after a fresh link just means WhatsApp is still syncing chats — that
+    // is NOT a dead session, and restarting it forces an unnecessary new QR scan. Only
+    // restart on real errors (Target closed, navigation, etc.); on pure timeouts, tell
+    // the user to wait and retry.
     const groupsWithId = (debug.rescanGroups || []).filter(g => g.group_id);
     const allFailed = groupsWithId.length > 0 && groupsWithId.every(g => g.error);
     if (allFailed && scanned === 0) {
       const errors = groupsWithId.map(g => g.error).join('; ');
+      const allTimeouts = groupsWithId.every(g => typeof g.error === 'string' && g.error.includes('timeout'));
+      if (allTimeouts) {
+        console.log(`[${userId}] All ${groupsWithId.length} groups timed out — WhatsApp still syncing, NOT restarting`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_still_syncing', data: { groups: groupsWithId.length }, ts: Date.now() }); }
+        return { syncing: true, message: `WhatsApp is still syncing chats after the fresh link. Wait ~60s, then click Rescan again.`, debug };
+      }
       console.log(`[${userId}] All ${groupsWithId.length} groups failed — session is functionally dead, forcing fresh restart. Errors: ${errors}`);
       if (session.eventLog) { session.eventLog.push({ type: 'dead_session_recover', data: { groups: groupsWithId.length, errors }, ts: Date.now() }); }
       try { await session.client?.destroy(); } catch (_) {}
