@@ -64,11 +64,24 @@ async function restoreSessionFromDb(userId, apiKey, appId) {
 }
 
 // Remove the local session directory and any stale files.
-function clearSessionFiles(userId) {
+async function clearSessionFiles(userId) {
   const sessionDir = path.join(DATA_DIR, 'session-' + userId);
-  if (fs.existsSync(sessionDir)) {
-    fs.rmSync(sessionDir, { recursive: true, force: true });
-    console.log(`[${userId}] Cleared local session files`);
+  if (!fs.existsSync(sessionDir)) return;
+  // Retry a few times — Chromium may still be releasing file handles when we
+  // remove the profile dir, causing ENOTEMPTY on the rmdir. Never throw: a
+  // leftover file shouldn't abort the rescan; LocalAuth recreates the structure.
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+      console.log(`[${userId}] Cleared local session files`);
+      return;
+    } catch (err) {
+      if (attempt === 5) {
+        console.error(`[${userId}] clearSessionFiles failed after 5 attempts:`, err.message);
+      } else {
+        await new Promise(r => setTimeout(r, 200 * attempt));
+      }
+    }
   }
 }
 
@@ -92,7 +105,7 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
 
   if (freshStart) {
     // Wipe stale local files + clear session_data in DB so WhatsApp does a clean link
-    clearSessionFiles(userId);
+    await clearSessionFiles(userId);
     await base44Api.updateSession(userId, apiKey, appId, {
       session_data: null,
       qr_code: null,
@@ -535,7 +548,7 @@ async function destroySession(userId) {
   } catch (_) {}
   sessions.delete(userId);
   // Also clear stale local session files so they don't interfere with the next link
-  clearSessionFiles(userId);
+  await clearSessionFiles(userId);
 }
 
 function getStatus(userId) {
@@ -663,7 +676,7 @@ async function rescanMessages(userId, apiKey, appId) {
     // Session is dead — restart fresh immediately
     try { await session.client?.destroy(); } catch (_) {}
     sessions.delete(userId);
-    clearSessionFiles(userId);
+    await clearSessionFiles(userId);
     await new Promise(r => setTimeout(r, 3000));
     startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
     return { reconnecting: true, message: `WhatsApp client is unresponsive (getState failed: ${fullErr.slice(0, 80)}). Restarting fresh — wait ~30s then try again.`, debug };
