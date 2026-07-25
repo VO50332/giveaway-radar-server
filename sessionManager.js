@@ -497,6 +497,28 @@ async function syncGroupIds(userId, client, apiKey, appId, debug = {}) {
 // getChatById (one chat at a time). Avoids getChats() which loads every chat
 // and OOMs the container. Used on connect. Groups without a group_id are
 // skipped here and get their group_id when their next message arrives.
+// Check whether a chat has been loaded into WhatsApp Web's local store WITHOUT
+// triggering a load. client.getChatById uses Store.Chat.find, which awaits a
+// server fetch and HANGS for chats that aren't synced yet — the #1 cause of
+// getChatById timeouts right after a fresh link. Store.Chat.get is synchronous
+// and returns undefined if the chat isn't loaded, so we skip unsynced chats
+// instantly and only call getChatById once the chat is actually present.
+async function isChatLoaded(client, chatId) {
+  try {
+    return await Promise.race([
+      client.pupPage.evaluate((id) => {
+        if (!window.Store || !window.Store.Chat || !window.Store.WidFactory) return false;
+        const wid = window.Store.WidFactory.createWid(id);
+        return !!(wid && window.Store.Chat.get(wid));
+      }, chatId),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('check_timeout')), 10000)),
+    ]);
+  } catch (err) {
+    console.log(`isChatLoaded check failed: ${err.message}`);
+    return false;
+  }
+}
+
 async function scanKnownGroups(userId, client, apiKey, appId, emit) {
   const sess = sessions.get(userId);
   try {
@@ -508,6 +530,12 @@ async function scanKnownGroups(userId, client, apiKey, appId, emit) {
       sess.eventLog.push({ type: 'scan_known_start', data: { count: activeGroups.length, names: activeGroups.map(g => g.group_name) }, ts: Date.now() });
     }
     for (const group of activeGroups) {
+      const loaded = await isChatLoaded(client, group.group_id);
+      if (!loaded) {
+        console.log(`[${userId}] scanKnownGroups: "${group.group_name}" not synced into store yet — skipping`);
+        if (sess) sess.eventLog.push({ type: 'scan_known_not_synced', data: { name: group.group_name }, ts: Date.now() });
+        continue;
+      }
       try {
         const chat = await Promise.race([
           client.getChatById(group.group_id),
@@ -760,6 +788,13 @@ async function rescanMessages(userId, apiKey, appId) {
         debug.rescanGroups.push({ name: group.group_name, skipped: true, reason: 'no_group_id' });
         continue;
       }
+      const loaded = await isChatLoaded(session.client, group.group_id);
+      if (!loaded) {
+        console.log(`[${userId}] Rescan: "${group.group_name}" not synced into store yet — skipping (retry later)`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_not_synced', data: { name: group.group_name }, ts: Date.now() }); }
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, notSynced: true });
+        continue;
+      }
       try {
         const chat = await Promise.race([
           session.client.getChatById(group.group_id),
@@ -790,6 +825,14 @@ async function rescanMessages(userId, apiKey, appId) {
     // restart on real errors (Target closed, navigation, etc.); on pure timeouts, tell
     // the user to wait and retry.
     const groupsWithId = (debug.rescanGroups || []).filter(g => g.group_id);
+    // Chats not yet synced into the local store — getChatById would hang waiting
+    // for them. The session is fine, so don't restart; just tell the user to retry.
+    const notSyncedCount = (debug.rescanGroups || []).filter(g => g.notSynced).length;
+    if (scanned === 0 && notSyncedCount > 0) {
+      console.log(`[${userId}] Rescan: ${notSyncedCount} group(s) still syncing into store — not restarting`);
+      if (session.eventLog) { session.eventLog.push({ type: 'rescan_still_syncing', data: { groups: notSyncedCount }, ts: Date.now() }); }
+      return { syncing: true, message: `WhatsApp is still loading your chats after the fresh link (getChatById waits for each chat to sync). Wait 1–2 minutes, then click Rescan again.`, debug };
+    }
     const allFailed = groupsWithId.length > 0 && groupsWithId.every(g => g.error);
     if (allFailed && scanned === 0) {
       const errors = groupsWithId.map(g => g.error).join('; ');
