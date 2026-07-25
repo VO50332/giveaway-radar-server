@@ -126,11 +126,13 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     // Pin WhatsApp Web version — the library's webpack-module injection breaks when
     // WhatsApp auto-updates their bundle (getChatById throws a minified "r" error when
     // the loaded version's module IDs no longer match what the library patches).
-    // remotePath MUST be the full wa-version URL (the library substitutes {version});
-    // a local path silently 404s and, with strict:false, falls back to the live
-    // (incompatible) WhatsApp Web. strict:true fails loudly instead of loading a broken
-    // version, so we never silently use a mismatched bundle again.
-    webVersion: '2.3000.1017054665',
+    // The library (v1.34.7) targets 2.3000.1017054665, but that exact build isn't in the
+    // wa-version archive, so a remote cache for it 404s and (with strict:false) silently
+    // falls back to the live, incompatible WhatsApp Web. 2.3000.1040111714-alpha is the
+    // closest archived build to the library's tested version. remotePath MUST be the full
+    // wa-version URL (the library substitutes {version}); strict:true fails loudly
+    // rather than ever loading a mismatched live bundle again.
+    webVersion: '2.3000.1040111714-alpha',
     webVersionCache: {
       type: 'remote',
       remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
