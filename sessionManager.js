@@ -595,7 +595,13 @@ async function verifyConnection(userId) {
 }
 
 async function rescanMessages(userId, apiKey, appId) {
-  if (!sessions.has(userId)) return { error: 'no_active_session' };
+  if (!sessions.has(userId)) {
+    // Server restarted (redeploy) wiped the in-memory session. Auto-start it;
+    // if session_data exists in DB it restores without a new QR.
+    console.log(`[${userId}] Rescan: no active session — auto-starting`);
+    startSession(userId, apiKey, appId, () => {}, { authToken: apiKey });
+    return { reconnecting: true, message: 'No active WhatsApp session on the server (it likely restarted). Starting it now — try Rescan again in ~30s, or open the Connect page if a new QR is needed.' };
+  }
   const session = sessions.get(userId);
   if (session.status !== 'connected') {
     // Auto-recover: if stuck initializing/restoring for > 60s, force a fresh restart
