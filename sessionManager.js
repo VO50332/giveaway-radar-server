@@ -236,6 +236,32 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
       }
     }, 10000);
 
+    // Periodic heartbeat — a restored session can report "CONNECTED" via
+    // getState yet have a dead Chromium page (getChats throws "Target closed")
+    // minutes later, leaving a stuck session until a manual Rescan. Ping every
+    // 3 min; on failure, fresh-restart so a new QR is generated automatically.
+    if (session.heartbeat) clearInterval(session.heartbeat);
+    session.heartbeat = setInterval(async () => {
+      try {
+        await Promise.race([
+          client.getState(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000)),
+        ]);
+      } catch (err) {
+        if (session.status !== 'connected') return; // already handling disconnect
+        logEvent(userId, 'heartbeat_failed', { error: err.message });
+        clearInterval(session.heartbeat);
+        session.heartbeat = null;
+        session.status = 'disconnected';
+        await base44Api.updateSession(userId, apiKey, appId, { status: 'disconnected' });
+        emit('disconnected', { reason: 'heartbeat_failed' });
+        try { await client.destroy(); } catch (_) {}
+        sessions.delete(userId);
+        await clearSessionFiles(userId);
+        setTimeout(() => startSession(userId, apiKey, appId, emit, { freshStart: true, authToken: apiKey }), 3000);
+      }
+    }, 180000);
+
     // Persist session to DB FIRST — before any potentially-hanging operations
     // so session_data is saved even if getChats() hangs later
     await saveSessionToDb(userId, apiKey, appId);
@@ -306,7 +332,9 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     clearTimeout(initTimeout);
     logEvent(userId, 'disconnected', { reason: String(reason) });
     if (sessions.has(userId)) {
-      sessions.get(userId).status = 'disconnected';
+      const sess = sessions.get(userId);
+      if (sess.heartbeat) { clearInterval(sess.heartbeat); sess.heartbeat = null; }
+      sess.status = 'disconnected';
     }
     emit('disconnected', { reason });
     await base44Api.updateSession(userId, apiKey, appId, { status: 'disconnected' });
@@ -543,6 +571,7 @@ async function disconnectSession(userId) {
 async function destroySession(userId) {
   if (!sessions.has(userId)) return;
   const session = sessions.get(userId);
+  if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
   try {
     await session.client.destroy();
   } catch (_) {}
