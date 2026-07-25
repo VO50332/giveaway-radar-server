@@ -594,6 +594,20 @@ async function verifyConnection(userId) {
   }
 }
 
+// Wait for an initializing/restoring session to settle into a terminal state.
+function waitForSessionReady(userId, timeoutMs) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const interval = setInterval(() => {
+      const s = sessions.get(userId);
+      if (!s) { clearInterval(interval); resolve('gone'); return; }
+      if (s.status === 'connected') { clearInterval(interval); resolve('connected'); return; }
+      if (s.status === 'pending_qr') { clearInterval(interval); resolve('pending_qr'); return; }
+      if (Date.now() - start > timeoutMs) { clearInterval(interval); resolve('timeout'); return; }
+    }, 2000);
+  });
+}
+
 async function rescanMessages(userId, apiKey, appId) {
   if (!sessions.has(userId)) {
     // Server restarted (redeploy) wiped the in-memory session. Auto-start it;
@@ -604,19 +618,25 @@ async function rescanMessages(userId, apiKey, appId) {
   }
   const session = sessions.get(userId);
   if (session.status !== 'connected') {
-    // Auto-recover: if stuck initializing/restoring for > 60s, force a fresh restart
-    const stuckMs = session.initStartedAt ? Date.now() - session.initStartedAt : 0;
-    if ((session.status === 'initializing' || session.status === 'restoring') && stuckMs > 60000) {
-      console.log(`[${userId}] Rescan: session stuck in ${session.status} for ${Math.round(stuckMs / 1000)}s — forcing fresh restart`);
-      try { await session.client?.destroy(); } catch (_) {}
-      sessions.delete(userId);
-      clearSessionFiles(userId);
-      // Wait for Chromium to fully exit before starting a new instance
-      await new Promise(r => setTimeout(r, 3000));
-      startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
-      return { reconnecting: true, message: `Session was stuck (${session.status} for ${Math.round(stuckMs / 1000)}s). Restarting fresh — wait ~30s then try again.` };
+    if (session.status === 'initializing' || session.status === 'restoring') {
+      // Wait for the session to finish starting up, then proceed if it connects
+      const settled = await waitForSessionReady(userId, 45000);
+      if (settled === 'pending_qr') {
+        return { reconnecting: true, message: 'Session needs a QR scan — open the Connect page to scan it, then try Rescan again.' };
+      }
+      if (settled !== 'connected') {
+        // Still stuck after 45s — force a fresh restart so a new QR is generated
+        console.log(`[${userId}] Rescan: still ${session.status} after 45s — forcing fresh restart`);
+        try { await session.client?.destroy(); } catch (_) {}
+        sessions.delete(userId);
+        clearSessionFiles(userId);
+        await new Promise(r => setTimeout(r, 3000));
+        startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+        return { reconnecting: true, message: 'Session was stuck initializing. Restarting fresh — open the Connect page to scan the new QR in ~30s.' };
+      }
+    } else {
+      return { error: 'not_connected', status: session.status };
     }
-    return { error: 'not_connected', status: session.status };
   }
   let scanned = 0;
   let skipped = 0;
