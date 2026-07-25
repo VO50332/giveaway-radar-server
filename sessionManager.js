@@ -266,62 +266,27 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     // so session_data is saved even if getChats() hangs later
     await saveSessionToDb(userId, apiKey, appId);
 
-    // Wait for WhatsApp to sync chats — on fresh connections this takes 20-40s
-    logEvent(userId, 'sync_wait_start', {});
-    await new Promise(r => setTimeout(r, 20000));
-
-    // Try to load groups via getChats — single attempt
-    let getChatsFailed = false;
-    let chats = await Promise.race([
-      client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-    ]).catch(err => {
-      const fullErr = err?.stack || err?.message || String(err);
-      logEvent(userId, 'getChats_failed', { error: fullErr });
-      getChatsFailed = true;
-      return [];
-    });
-    let groups = chats.filter(c => c.isGroup);
-    logEvent(userId, 'groups_loaded', { count: groups.length, total_chats: chats.length, failed: getChatsFailed });
-
-    // Retry once if getChats returned no groups
-    if (groups.length === 0) {
-      logEvent(userId, 'groups_empty_retrying', { failed: getChatsFailed });
-      await new Promise(r => setTimeout(r, 15000));
-      getChatsFailed = false;
-      chats = await Promise.race([
-        client.getChats(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-      ]).catch(err => {
-        const fullErr = err?.stack || err?.message || String(err);
-        logEvent(userId, 'getChats_retry_failed', { error: fullErr });
-        getChatsFailed = true;
-        return [];
-      });
-      groups = chats.filter(c => c.isGroup);
-      logEvent(userId, 'groups_retry', { count: groups.length, failed: getChatsFailed });
+    // NOTE: we deliberately do NOT call client.getChats() here. On Railway's
+    // limited RAM, loading every chat + message history right after connect
+    // OOMs the container — it restarts and wipes the in-memory session map,
+    // so every subsequent Rescan says "no active session on the server".
+    // Instead, read the group count from the DB and only fetch the specific
+    // monitored groups we already have a group_id for (light: getChatById).
+    try {
+      const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
+      session.groups_count = monitoredGroups.length;
+      logEvent(userId, 'groups_count_from_db', { count: monitoredGroups.length });
+      await base44Api.updateSession(userId, apiKey, appId, { groups_count: monitoredGroups.length });
+      emit('groups', { count: monitoredGroups.length });
+    } catch (err) {
+      logEvent(userId, 'groups_count_failed', { error: err.message });
     }
 
-    // If getChats failed both times, the WhatsApp Web session is broken — restart fresh
-    if (getChatsFailed && groups.length === 0) {
-      logEvent(userId, 'session_broken_restart', { reason: 'getChats_failed_twice' });
-      session.status = 'disconnected';
-      await base44Api.updateSession(userId, apiKey, appId, { status: 'pending_qr', qr_code: null });
-      emit('disconnected', { reason: 'getChats_failed_restart' });
-      try { await client.destroy(); } catch (_) {}
-      sessions.delete(userId);
-      startSession(userId, apiKey, appId, emit, { freshStart: true });
-      return;
-    }
-
-    session.groups = groups;
-    session.groups_count = groups.length;
-    logEvent(userId, 'groups_final', { count: groups.length });
-    await base44Api.updateSession(userId, apiKey, appId, { groups_count: groups.length });
-    emit('groups', { count: groups.length });
-
-    // Scan recent messages in active groups for matches
-    await scanRecentMessages(userId, client, apiKey, appId, emit);
+    // Scan recent messages ONLY in groups that already have a stored group_id.
+    // Groups without a group_id are populated lazily when their next message
+    // arrives (processMessage writes group_id). This keeps connect-time memory
+    // usage flat regardless of how many chats the account has.
+    await scanKnownGroups(userId, client, apiKey, appId, emit);
   });
 
   client.on('message', async (msg) => {
@@ -523,6 +488,47 @@ async function syncGroupIds(userId, client, apiKey, appId, debug = {}) {
   return monitoredGroups;
 }
 
+// Memory-light scan: fetch only groups we already have a group_id for, via
+// getChatById (one chat at a time). Avoids getChats() which loads every chat
+// and OOMs the container. Used on connect. Groups without a group_id are
+// skipped here and get their group_id when their next message arrives.
+async function scanKnownGroups(userId, client, apiKey, appId, emit) {
+  const sess = sessions.get(userId);
+  try {
+    const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
+    const activeGroups = monitoredGroups.filter(g => g.is_active && g.group_id);
+    console.log(`[${userId}] scanKnownGroups: ${activeGroups.length} groups with group_id (getChats skipped)`);
+    if (sess) {
+      sess.eventLog = sess.eventLog || [];
+      sess.eventLog.push({ type: 'scan_known_start', data: { count: activeGroups.length, names: activeGroups.map(g => g.group_name) }, ts: Date.now() });
+    }
+    for (const group of activeGroups) {
+      try {
+        const chat = await Promise.race([
+          client.getChatById(group.group_id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_30s')), 30000)),
+        ]);
+        if (!chat) continue;
+        const messages = await chat.fetchMessages({ limit: 100 });
+        console.log(`[${userId}] scanKnownGroups: ${messages.length} msgs in "${group.group_name}"`);
+        if (sess) sess.eventLog.push({ type: 'scan_known_group', data: { name: group.group_name, messages: messages.length }, ts: Date.now() });
+        for (const msg of messages) {
+          if (!msg.body && !msg.hasMedia) continue;
+          await processMessage(userId, apiKey, appId, client, msg, emit, chat);
+        }
+      } catch (err) {
+        console.log(`[${userId}] scanKnownGroups getChatById failed for "${group.group_name}": ${err.message}`);
+        if (sess) sess.eventLog.push({ type: 'scan_known_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() });
+      }
+    }
+    if (sess) sess.eventLog.push({ type: 'scan_known_complete', data: {}, ts: Date.now() });
+    console.log(`[${userId}] scanKnownGroups complete`);
+  } catch (err) {
+    console.error(`[${userId}] scanKnownGroups error:`, err.message);
+    if (sess) sess.eventLog.push({ type: 'scan_known_error', data: { error: err.message }, ts: Date.now() });
+  }
+}
+
 async function scanRecentMessages(userId, client, apiKey, appId, emit) {
   const sess = sessions.get(userId);
   try {
@@ -719,9 +725,14 @@ async function rescanMessages(userId, apiKey, appId) {
     debug.rawApiError = { message: rawErr.message };
   }
   try {
-    const monitoredGroups = await syncGroupIds(userId, session.client, apiKey, appId, debug);
-    console.log(`[${userId}] Rescan: getConnectedGroups returned ${monitoredGroups.length} groups, appId=${appId}`);
+    // Read monitored groups straight from the DB. We intentionally do NOT call
+    // syncGroupIds()/getChats() here — loading every chat OOMs the Railway
+    // container and restarts it (wiping the session). Groups without a stored
+    // group_id are skipped; they get one when their next message arrives.
+    const monitoredGroups = await base44Api.getConnectedGroups(userId, apiKey, appId);
+    console.log(`[${userId}] Rescan: ${monitoredGroups.length} monitored groups (getChats skipped to avoid OOM), appId=${appId}`);
     debug.groupsReturned = monitoredGroups.length;
+    debug.getChatsSkipped = true;
     if (session.eventLog) { session.eventLog.push({ type: 'rescan_groups_loaded', data: { total: monitoredGroups.length, names: monitoredGroups.map(g => g.group_name) }, ts: Date.now() }); }
     const activeGroups = monitoredGroups.filter(g => g.is_active);
     console.log(`[${userId}] Rescan: ${activeGroups.length} active groups`);
