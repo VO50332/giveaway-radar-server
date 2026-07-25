@@ -507,11 +507,24 @@ async function isChatLoaded(client, chatId) {
   try {
     return await Promise.race([
       client.pupPage.evaluate((id) => {
-        if (!window.Store || !window.Store.Chat || !window.Store.WidFactory) return false;
-        const wid = window.Store.WidFactory.createWid(id);
-        return !!(wid && window.Store.Chat.get(wid));
+        if (!window.Store || !window.Store.Chat) return false;
+        // Iterate the in-memory models and compare serialized ids. Store.Chat.get(wid)
+        // is unreliable here because Backbone keys by the model id, which is a Wid
+        // object — a freshly created Wid won't match by reference, causing false
+        // negatives even when the chat IS loaded. Iterating .models is cheap (no
+        // deep serialization → no OOM risk, unlike getChats()).
+        const arr = window.Store.Chat.getModelsArray
+          ? window.Store.Chat.getModelsArray()
+          : (window.Store.Chat.models || []);
+        for (const c of arr) {
+          const cid = c && c.id;
+          if (!cid) continue;
+          if (cid._serialized === id) return true;
+          if (typeof cid.toString === 'function' && cid.toString() === id) return true;
+        }
+        return false;
       }, chatId),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('check_timeout')), 10000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('check_timeout')), 15000)),
     ]);
   } catch (err) {
     console.log(`isChatLoaded check failed: ${err.message}`);
