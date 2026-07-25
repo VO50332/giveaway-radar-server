@@ -658,13 +658,22 @@ function waitForSessionReady(userId, timeoutMs) {
 
 async function rescanMessages(userId, apiKey, appId) {
   if (!sessions.has(userId)) {
-    // Server restarted (redeploy) wiped the in-memory session. The saved
-    // session_data is usually stale by then — restoring it makes WhatsApp Web
-    // navigate mid-injection ("Execution context was destroyed"). Fresh-start
-    // so a clean QR is generated.
-    console.log(`[${userId}] Rescan: no active session — auto-starting fresh`);
-    startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
-    return { reconnecting: true, message: 'No active WhatsApp session on the server (it likely restarted). Starting fresh — open the Connect page to scan the new QR in ~30s, then try Rescan once connected.' };
+    // Server restarted (redeploy/OOM) wiped the in-memory session. Try to
+    // restore from the saved session_data first — if the WhatsApp link is
+    // still valid server-side, this reconnects WITHOUT a new QR scan. Only
+    // fresh-start (new QR) if the restore fails or the session expired.
+    console.log(`[${userId}] Rescan: no active session — attempting restore from DB`);
+    startSession(userId, apiKey, appId, () => {}, { freshStart: false, authToken: apiKey });
+    const settled = await waitForSessionReady(userId, 60000);
+    if (settled === 'connected') {
+      console.log(`[${userId}] Rescan: restore succeeded — reconnected without QR`);
+    } else if (settled === 'pending_qr') {
+      return { reconnecting: true, message: 'Your previous WhatsApp session expired. Open the Connect page to scan the new QR, then try Rescan again.' };
+    } else {
+      console.log(`[${userId}] Rescan: restore failed (${settled}) — forcing fresh restart`);
+      startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+      return { reconnecting: true, message: 'No active WhatsApp session and restore failed. Starting fresh — open the Connect page to scan the new QR in ~30s, then try Rescan once connected.' };
+    }
   }
   const session = sessions.get(userId);
   if (session.status !== 'connected') {
