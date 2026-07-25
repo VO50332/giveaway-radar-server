@@ -610,11 +610,13 @@ function waitForSessionReady(userId, timeoutMs) {
 
 async function rescanMessages(userId, apiKey, appId) {
   if (!sessions.has(userId)) {
-    // Server restarted (redeploy) wiped the in-memory session. Auto-start it;
-    // if session_data exists in DB it restores without a new QR.
-    console.log(`[${userId}] Rescan: no active session — auto-starting`);
-    startSession(userId, apiKey, appId, () => {}, { authToken: apiKey });
-    return { reconnecting: true, message: 'No active WhatsApp session on the server (it likely restarted). Starting it now — try Rescan again in ~30s, or open the Connect page if a new QR is needed.' };
+    // Server restarted (redeploy) wiped the in-memory session. The saved
+    // session_data is usually stale by then — restoring it makes WhatsApp Web
+    // navigate mid-injection ("Execution context was destroyed"). Fresh-start
+    // so a clean QR is generated.
+    console.log(`[${userId}] Rescan: no active session — auto-starting fresh`);
+    startSession(userId, apiKey, appId, () => {}, { freshStart: true, authToken: apiKey });
+    return { reconnecting: true, message: 'No active WhatsApp session on the server (it likely restarted). Starting fresh — open the Connect page to scan the new QR in ~30s, then try Rescan once connected.' };
   }
   const session = sessions.get(userId);
   if (session.status !== 'connected') {
