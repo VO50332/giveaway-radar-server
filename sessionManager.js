@@ -124,14 +124,17 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: DATA_DIR }),
     // Pin WhatsApp Web version — the library's webpack-module injection breaks when
-    // WhatsApp auto-updates their bundle. 2.3000.1032900857 is the version v1.34.7 was
-    // tested against (per PR #5807). strict:true fails loudly if it can't be fetched,
-    // rather than silently falling back to a broken "latest".
-    webVersion: '2.3000.1032900857',
+    // WhatsApp auto-updates their bundle (getChatById throws a minified "r" error when
+    // the loaded version's module IDs no longer match what the library patches).
+    // remotePath MUST be the full wa-version URL (the library substitutes {version});
+    // a local path silently 404s and, with strict:false, falls back to the live
+    // (incompatible) WhatsApp Web. strict:true fails loudly instead of loading a broken
+    // version, so we never silently use a mismatched bundle again.
+    webVersion: '2.3000.1017054665',
     webVersionCache: {
       type: 'remote',
-      remotePath: './.wwebjs_cache',
-      strict: false,
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+      strict: true,
     },
     puppeteer: {
       headless: true,
