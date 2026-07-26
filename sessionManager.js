@@ -805,21 +805,29 @@ async function rescanMessages(userId, apiKey, appId) {
         continue;
       }
       const loaded = await isChatLoaded(session.client, group.group_id);
-      if (!loaded) {
-        console.log(`[${userId}] Rescan: "${group.group_name}" not synced into store yet — skipping (retry later)`);
-        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_not_synced', data: { name: group.group_name }, ts: Date.now() }); }
-        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, notSynced: true });
+      let chat = null;
+      try {
+        // If the chat is already in the local store, getChatById (Store.Chat.find)
+        // returns instantly. If not, find asks the server for this specific chat — a
+        // force-load that either pulls it in (then we scan it) or times out (skip,
+        // tell the user to retry). Bounded per-chat so one slow group can't stall
+        // the whole rescan.
+        chat = await Promise.race([
+          session.client.getChatById(group.group_id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error(loaded ? 'getChatById_timeout_60s' : 'force_load_timeout_30s')), loaded ? 60000 : 30000)),
+        ]);
+      } catch (err) {
+        console.log(`[${userId}] Rescan: ${loaded ? 'getChatById' : 'force-load'} failed for "${group.group_name}": ${err.message}`);
+        if (session.eventLog) { session.eventLog.push({ type: loaded ? 'rescan_group_failed' : 'rescan_group_not_synced', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message, notSynced: !loaded });
         continue;
       }
+      if (!chat) continue;
       try {
-        const chat = await Promise.race([
-          session.client.getChatById(group.group_id),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_60s')), 60000)),
-        ]);
         const messages = await chat.fetchMessages({ limit: 100 });
         const msgCount = messages.length;
-        console.log(`[${userId}] Rescan: ${msgCount} msgs in "${group.group_name}"`);
-        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: msgCount }, ts: Date.now() }); }
+        console.log(`[${userId}] Rescan: ${msgCount} msgs in "${group.group_name}"${loaded ? '' : ' (force-loaded)'}`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: msgCount, forceLoaded: !loaded }, ts: Date.now() }); }
         let processed = 0;
         for (const msg of messages) {
           if (!msg.body && !msg.hasMedia) continue;
@@ -827,9 +835,9 @@ async function rescanMessages(userId, apiKey, appId) {
           scanned++;
           processed++;
         }
-        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, totalMsgs: msgCount, processed, scanned });
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, totalMsgs: msgCount, processed, scanned, forceLoaded: !loaded });
       } catch (err) {
-        console.log(`[${userId}] Rescan: getChatById failed for "${group.group_name}": ${err.message}`);
+        console.log(`[${userId}] Rescan: fetchMessages failed for "${group.group_name}": ${err.message}`);
         if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
         debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
       }
