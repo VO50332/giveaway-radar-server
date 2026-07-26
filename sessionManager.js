@@ -805,29 +805,27 @@ async function rescanMessages(userId, apiKey, appId) {
         continue;
       }
       const loaded = await isChatLoaded(session.client, group.group_id);
-      let chat = null;
-      try {
-        // If the chat is already in the local store, getChatById (Store.Chat.find)
-        // returns instantly. If not, find asks the server for this specific chat — a
-        // force-load that either pulls it in (then we scan it) or times out (skip,
-        // tell the user to retry). Bounded per-chat so one slow group can't stall
-        // the whole rescan.
-        chat = await Promise.race([
-          session.client.getChatById(group.group_id),
-          new Promise((_, reject) => setTimeout(() => reject(new Error(loaded ? 'getChatById_timeout_60s' : 'force_load_timeout_30s')), loaded ? 60000 : 30000)),
-        ]);
-      } catch (err) {
-        console.log(`[${userId}] Rescan: ${loaded ? 'getChatById' : 'force-load'} failed for "${group.group_name}": ${err.message}`);
-        if (session.eventLog) { session.eventLog.push({ type: loaded ? 'rescan_group_failed' : 'rescan_group_not_synced', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
-        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message, notSynced: !loaded });
+      if (!loaded) {
+        // On a freshly linked companion device, Store.Chat only receives a chat once
+        // WhatsApp syncs it — and Store.Chat.find (getChatById) HANGS for unsynced
+        // chats rather than returning (confirmed by repeated force-load timeouts).
+        // So we skip instantly instead of hanging. Real-time monitoring (the `message`
+        // event) works regardless, and once any message arrives in the group the chat
+        // lands in the store and Rescan will backfill its recent messages.
+        console.log(`[${userId}] Rescan: "${group.group_name}" not synced into store yet — skipping`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_not_synced', data: { name: group.group_name }, ts: Date.now() }); }
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, notSynced: true });
         continue;
       }
-      if (!chat) continue;
       try {
+        const chat = await Promise.race([
+          session.client.getChatById(group.group_id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_60s')), 60000)),
+        ]);
         const messages = await chat.fetchMessages({ limit: 100 });
         const msgCount = messages.length;
-        console.log(`[${userId}] Rescan: ${msgCount} msgs in "${group.group_name}"${loaded ? '' : ' (force-loaded)'}`);
-        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: msgCount, forceLoaded: !loaded }, ts: Date.now() }); }
+        console.log(`[${userId}] Rescan: ${msgCount} msgs in "${group.group_name}"`);
+        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group', data: { name: group.group_name, messages: msgCount }, ts: Date.now() }); }
         let processed = 0;
         for (const msg of messages) {
           if (!msg.body && !msg.hasMedia) continue;
@@ -835,9 +833,9 @@ async function rescanMessages(userId, apiKey, appId) {
           scanned++;
           processed++;
         }
-        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, totalMsgs: msgCount, processed, scanned, forceLoaded: !loaded });
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, totalMsgs: msgCount, processed, scanned });
       } catch (err) {
-        console.log(`[${userId}] Rescan: fetchMessages failed for "${group.group_name}": ${err.message}`);
+        console.log(`[${userId}] Rescan: getChatById failed for "${group.group_name}": ${err.message}`);
         if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
         debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
       }
@@ -855,7 +853,7 @@ async function rescanMessages(userId, apiKey, appId) {
     if (scanned === 0 && notSyncedCount > 0) {
       console.log(`[${userId}] Rescan: ${notSyncedCount} group(s) still syncing into store — not restarting`);
       if (session.eventLog) { session.eventLog.push({ type: 'rescan_still_syncing', data: { groups: notSyncedCount }, ts: Date.now() }); }
-      return { syncing: true, message: `WhatsApp is still loading your chats after the fresh link (getChatById waits for each chat to sync). Wait 1–2 minutes, then click Rescan again.`, debug };
+      return { syncing: true, message: `WhatsApp is linked and already monitoring in real-time. The group hasn't synced its history to this linked device yet (WhatsApp Web hangs on unsynced chats). Once any message arrives in the group, click Rescan again to backfill recent messages.`, debug };
     }
     const allFailed = groupsWithId.length > 0 && groupsWithId.every(g => g.error);
     if (allFailed && scanned === 0) {
