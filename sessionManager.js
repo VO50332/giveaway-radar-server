@@ -340,17 +340,45 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
   // Download attached image (if any) and upload to storage so it can be shown in the UI
   let imageUrl = null;
   if (msg.hasMedia) {
-    try {
-      const media = await Promise.race([
-        msg.downloadMedia(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('media_download_timeout_30s')), 30000)),
-      ]);
-      if (media && media.data && (media.mimetype || '').startsWith('image/')) {
-        imageUrl = await base44Api.uploadMedia(userId, media.data, media.mimetype, media.filename || 'image.jpg');
+    const sess = sessions.get(userId);
+    const logMedia = (type, data = {}) => {
+      console.log(`[${userId}] MEDIA ${type}: ${JSON.stringify(data)}`);
+      if (sess) {
+        sess.eventLog = sess.eventLog || [];
+        sess.eventLog.push({ type: `media_${type}`, data, ts: Date.now() });
+        if (sess.eventLog.length > 80) sess.eventLog.shift();
       }
-    } catch (err) {
-      console.error(`[${userId}] Media download failed:`, err.message);
-      emit('log', { type: 'media_download_failed', data: { error: err.message } });
+      emit('log', { type: `media_${type}`, data });
+    };
+    logMedia('attempt', { messageId: msg.id?._serialized, msgType: msg.type });
+    // On a linked companion device the media blob isn't always ready the instant the
+    // `message` event fires — downloadMedia can fail or time out. Retry a couple of
+    // times with a short delay so WhatsApp has a chance to sync/decrypt it.
+    let media = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3 && !media; attempt++) {
+      try {
+        media = await Promise.race([
+          msg.downloadMedia(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('media_download_timeout_15s')), 15000)),
+        ]);
+      } catch (err) {
+        lastErr = err.message;
+        logMedia('download_failed', { attempt, error: err.message });
+        if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+    if (media && media.data) {
+      const mt = media.mimetype || '';
+      if (mt.startsWith('image/')) {
+        imageUrl = await base44Api.uploadMedia(userId, media.data, mt, media.filename || 'image.jpg');
+        if (!imageUrl) logMedia('upload_failed', { mimetype: mt, size: media.data.length });
+        else logMedia('uploaded', { mimetype: mt, size: media.data.length });
+      } else {
+        logMedia('not_image', { mimetype: mt });
+      }
+    } else {
+      logMedia('no_media', { error: lastErr || 'empty' });
     }
   }
 
