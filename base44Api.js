@@ -136,6 +136,16 @@ async function updateConnectedGroup(userId, _apiKey, _appId, groupId, updates) {
   }
 }
 
+async function findMatchesByMessageId(userId, messageId) {
+  try {
+    const client = await getClient(userId);
+    return await client.entities.Match.filter({ user_id: userId, message_id: messageId });
+  } catch (err) {
+    console.error('findMatchesByMessageId error:', err.message);
+    return [];
+  }
+}
+
 async function findExistingMatch(userId, messageId, wishlistItemId) {
   try {
     const client = await getClient(userId);
@@ -248,6 +258,7 @@ module.exports = {
   getUserPhone,
   updateConnectedGroup,
   findExistingMatch,
+  findMatchesByMessageId,
   updateMatch,
   listWhatsAppSessions,
   getWhatsAppSession,
