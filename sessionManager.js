@@ -852,20 +852,12 @@ async function rescanMessages(userId, apiKey, appId) {
         debug.rescanGroups.push({ name: group.group_name, skipped: true, reason: 'no_group_id' });
         continue;
       }
-      const loaded = await isChatLoaded(session.client, group.group_id);
-      if (!loaded) {
-        // On a freshly linked companion device, Store.Chat only receives a chat once
-        // WhatsApp syncs it — and Store.Chat.find (getChatById) HANGS for unsynced
-        // chats rather than returning (confirmed by repeated force-load timeouts).
-        // So we skip instantly instead of hanging. Real-time monitoring (the `message`
-        // event) works regardless, and once any message arrives in the group the chat
-        // lands in the store and Rescan will backfill its recent messages.
-        console.log(`[${userId}] Rescan: "${group.group_name}" not synced into store yet — skipping`);
-        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_not_synced', data: { name: group.group_name }, ts: Date.now() }); }
-        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, notSynced: true });
-        continue;
-      }
       try {
+        // getChatById triggers a server sync for chats not yet in the local store.
+        // On a freshly linked companion the group may not be synced yet — calling
+        // getChatById forces WhatsApp to fetch it (this works now that the Web version
+        // is pinned correctly; the old "hang" was the version-mismatch "r" error).
+        // Bounded by 60s so an unsynced chat can't stall the rescan forever.
         const chat = await Promise.race([
           session.client.getChatById(group.group_id),
           new Promise((_, reject) => setTimeout(() => reject(new Error('getChatById_timeout_60s')), 60000)),
@@ -883,9 +875,10 @@ async function rescanMessages(userId, apiKey, appId) {
         }
         debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, totalMsgs: msgCount, processed, scanned });
       } catch (err) {
-        console.log(`[${userId}] Rescan: getChatById failed for "${group.group_name}": ${err.message}`);
-        if (session.eventLog) { session.eventLog.push({ type: 'rescan_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
-        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, error: err.message });
+        const isTimeout = typeof err.message === 'string' && err.message.includes('timeout');
+        console.log(`[${userId}] Rescan: getChatById ${isTimeout ? 'timed out (chat not synced yet)' : 'failed'} for "${group.group_name}": ${err.message}`);
+        if (session.eventLog) { session.eventLog.push({ type: isTimeout ? 'rescan_group_not_synced' : 'rescan_group_failed', data: { name: group.group_name, error: err.message }, ts: Date.now() }); }
+        debug.rescanGroups.push({ name: group.group_name, group_id: group.group_id, notSynced: isTimeout, error: err.message });
       }
     }
     // Auto-recover: if every group with a group_id failed, the underlying Chromium page
