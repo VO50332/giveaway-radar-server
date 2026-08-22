@@ -459,9 +459,12 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
     if (item.notify_via_whatsapp) {
       const userPhone = await base44Api.getUserPhone(userId, apiKey, appId);
       if (userPhone) {
+        // WhatsApp JIDs must be digits only — a stored "+972..." becomes the
+        // invalid "+972...@c.us" and the send silently fails. Strip non-digits.
+        const cleanPhone = userPhone.replace(/[^0-9]/g, '');
         const notifMsg = `🎯 *GiveAway Match!*\n\n*Item:* ${item.title}\n*Group:* ${groupName}\n*From:* ${senderNumber || sender}\n*Message:* ${content.slice(0, 200)}\n*Status:* ${availabilityStatus === 'available' ? '✅ Available' : '❓ Unknown'}`;
         try {
-          await client.sendMessage(`${userPhone}@c.us`, notifMsg);
+          await client.sendMessage(`${cleanPhone}@c.us`, notifMsg);
           notifStatus = 'sent';
           await base44Api.updateMatch(userId, apiKey, appId, match.id, { notification_sent: true });
         } catch (sendErr) {
@@ -894,7 +897,7 @@ async function rescanMessages(userId, apiKey, appId) {
     if (scanned === 0 && notSyncedCount > 0) {
       console.log(`[${userId}] Rescan: ${notSyncedCount} group(s) still syncing into store — not restarting`);
       if (session.eventLog) { session.eventLog.push({ type: 'rescan_still_syncing', data: { groups: notSyncedCount }, ts: Date.now() }); }
-      return { syncing: true, message: `WhatsApp is linked and already monitoring in real-time. The group hasn't synced its history to this linked device yet (WhatsApp Web hangs on unsynced chats). Once any message arrives in the group, click Rescan again to backfill recent messages.`, debug };
+      return { syncing: true, message: `WhatsApp is linked and real-time monitoring is already active — you'll be alerted the instant a new matching message arrives. The group's history hasn't synced to this linked device yet (WhatsApp controls companion-device sync, and getChatById hangs until it does). To trigger the sync now, send any message into the group from your phone — that forces the linked device to load the chat — then click Rescan again to backfill recent messages.`, debug };
     }
     const allFailed = groupsWithId.length > 0 && groupsWithId.every(g => g.error);
     if (allFailed && scanned === 0) {
