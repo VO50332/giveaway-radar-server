@@ -248,6 +248,10 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
       console.log(`[${userId}] WhatsApp connected`);
     }
 
+    // Auto-download photos so the media blob is available when downloadMedia() is
+    // called — on linked companion devices media isn't fetched by default.
+    try { await client.setAutoDownloadPhotos(true); } catch (_) {}
+
     // Re-verify after 10s — catches connections that drop right after ready
     setTimeout(async () => {
       try {
@@ -319,6 +323,26 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
 
   client.on('message', async (msg) => {
     await processMessage(userId, apiKey, appId, client, msg, emit);
+  });
+
+  // Handle emoji reactions (e.g. someone reacts with 💾/❌ to mark an item taken).
+  // Reactions are separate from replies — hasQuotedMsg doesn't catch them.
+  client.on('message_reaction', async (reaction) => {
+    try {
+      const emoji = reaction?.reaction || '';
+      const parentMsgId = reaction?.msgId?._serialized;
+      if (!parentMsgId || !emoji) return;
+      if (matcher.detectAvailability(emoji) !== 'taken') return;
+      const originalMatches = await base44Api.findMatchesByMessageId(userId, parentMsgId);
+      for (const m of originalMatches) {
+        if (m.availability_status !== 'taken') {
+          await base44Api.updateMatch(userId, apiKey, appId, m.id, { availability_status: 'taken' });
+          console.log(`[${userId}] Match ${m.id} marked as taken via reaction ${emoji}`);
+        }
+      }
+    } catch (err) {
+      console.log(`[${userId}] message_reaction handling failed: ${err.message}`);
+    }
   });
 
   client.on('disconnected', async (reason) => {
