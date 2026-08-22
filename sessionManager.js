@@ -381,6 +381,11 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
   const matchedGroup = monitoredGroups.find(g => g.group_name.trim() === groupName.trim() && g.is_active);
   if (!matchedGroup) return;
 
+  // Skip messages ending with a question mark — these are requests ("Does anyone
+  // have X?"), not giveaway offers, so they're not useful as matches.
+  const trimmedContent = content.trim();
+  if (trimmedContent.endsWith('?') || trimmedContent.endsWith('؟')) return;
+
   // Detect "taken" replies: if this message is a reply (e.g. someone reacted with
   // 💾/❌) to an original giveaway post, mark that original match as taken so it
   // drops out of the active matches list.
@@ -479,7 +484,15 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
     // Skip if we already matched this message for this wishlist item
     if (msg.id?._serialized) {
       const existing = await base44Api.findExistingMatch(userId, msg.id._serialized, item.id);
-      if (existing) continue;
+      if (existing) {
+        // Backfill the image if we now have one but the existing match doesn't
+        // (e.g. media download succeeds on a later rescan after auto-download was enabled)
+        if (imageUrl && !existing.image_url) {
+          await base44Api.updateMatch(userId, apiKey, appId, existing.id, { image_url: imageUrl });
+          console.log(`[${userId}] Backfilled image for existing match ${existing.id}`);
+        }
+        continue;
+      }
     }
 
     const availabilityStatus = matcher.detectAvailability(content);
