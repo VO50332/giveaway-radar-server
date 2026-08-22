@@ -357,9 +357,35 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
   const matchedGroup = monitoredGroups.find(g => g.group_name.trim() === groupName.trim() && g.is_active);
   if (!matchedGroup) return;
 
-  // Download attached image (if any) and upload to storage so it can be shown in the UI
+  // Detect "taken" replies: if this message is a reply (e.g. someone reacted with
+  // 💾/❌) to an original giveaway post, mark that original match as taken so it
+  // drops out of the active matches list.
+  if (msg.hasQuotedMsg) {
+    try {
+      const quoted = await msg.getQuotedMessage();
+      if (quoted && quoted.id?._serialized) {
+        const replyAvailability = matcher.detectAvailability(msg.body || '');
+        if (replyAvailability === 'taken') {
+          const originalMatches = await base44Api.findMatchesByMessageId(userId, quoted.id._serialized);
+          for (const m of originalMatches) {
+            if (m.availability_status !== 'taken') {
+              await base44Api.updateMatch(userId, apiKey, appId, m.id, { availability_status: 'taken' });
+              console.log(`[${userId}] Match ${m.id} marked as taken via reply`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.log(`[${userId}] Reply taken-detection failed: ${err.message}`);
+    }
+  }
+
+  // Download attached image (if any) and upload to storage so it can be shown in the UI.
+  // On linked companion devices msg.hasMedia can be false even for image messages, so
+  // also trigger the download on the message type.
   let imageUrl = null;
-  if (msg.hasMedia) {
+  const isMediaMsg = msg.hasMedia || ['image', 'video', 'document', 'sticker', 'ptt', 'audio'].includes(msg.type);
+  if (isMediaMsg) {
     const sess = sessions.get(userId);
     const logMedia = (type, data = {}) => {
       console.log(`[${userId}] MEDIA ${type}: ${JSON.stringify(data)}`);
