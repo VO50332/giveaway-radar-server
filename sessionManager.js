@@ -525,13 +525,16 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
         // WhatsApp JIDs must be digits only — a stored "+972..." becomes the
         // invalid "+972...@c.us" and the send silently fails. Strip non-digits.
         const cleanPhone = userPhone.replace(/[^0-9]/g, '');
-        const notifMsg = `🎯 *GiveAway Match!*\n\n*Item:* ${item.title}\n*Group:* ${groupName}\n*From:* ${senderNumber || sender}\n*Message:* ${content.slice(0, 200)}\n*Status:* ${availabilityStatus === 'available' ? '✅ Available' : '❓ Unknown'}`;
+        // Forward the original message (preserves its text + media) to the user,
+        // preceded by a short intro so they know which wishlist item matched.
+        const introMsg = `🎯 *GiveLoop Match: ${item.title}*\n📍 ${groupName}`;
         try {
-          await client.sendMessage(`${cleanPhone}@c.us`, notifMsg);
+          await client.sendMessage(`${cleanPhone}@c.us`, introMsg);
+          await msg.forward(`${cleanPhone}@c.us`);
           notifStatus = 'sent';
           await base44Api.updateMatch(userId, apiKey, appId, match.id, { notification_sent: true });
         } catch (sendErr) {
-          console.error(`[${userId}] WhatsApp send failed:`, sendErr.message);
+          console.error(`[${userId}] WhatsApp send/forward failed:`, sendErr.message);
           notifStatus = 'failed';
         }
       }
