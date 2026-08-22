@@ -10,6 +10,35 @@ const matcher = require('./matcher');
 const sessions = new Map();
 const DATA_DIR = process.env.DATA_DIR || '/data';
 
+// --- WhatsApp Web version auto-resolution ---
+// The wa-version archive only keeps a rolling window of builds, so any hardcoded
+// webVersion pin eventually 404s and initialization fails ("Couldn't load version X
+// from the archive"). Instead of pinning, resolve the OLDEST build currently in the
+// archive from the GitHub contents API at session start — it's always present, and
+// it's the most stable end of the rolling window. Falls back to a known-good pin
+// only if the API is unreachable (rate limit / outage).
+const FALLBACK_WEB_VERSION = '2.3000.1041871181-alpha';
+async function resolveWebVersion() {
+  try {
+    const res = await fetch('https://api.github.com/repos/wppconnect-team/wa-version/contents/html?ref=main', {
+      headers: { 'User-Agent': 'giveaway-radar' },
+    });
+    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+    const files = await res.json();
+    const versions = files
+      .filter(f => f.name && f.name.endsWith('.html'))
+      .map(f => f.name.replace(/\.html$/, ''))
+      .sort();
+    if (versions.length === 0) throw new Error('no builds in archive');
+    const oldest = versions[0];
+    console.log(`[sessionManager] Resolved WhatsApp Web version ${oldest} (${versions.length} builds available)`);
+    return oldest;
+  } catch (err) {
+    console.error(`[sessionManager] resolveWebVersion failed (${err.message}) — using fallback ${FALLBACK_WEB_VERSION}`);
+    return FALLBACK_WEB_VERSION;
+  }
+}
+
 // --- DB-backed session persistence ---
 // Serialize the session directory to a single JSON string, save to DB.
 async function saveSessionToDb(userId, apiKey, appId) {
@@ -121,21 +150,12 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     }
   }
 
+  // Resolve the oldest WhatsApp Web build currently in the wa-version archive so the
+  // version pin never 404s as the archive rolls forward. (See resolveWebVersion above.)
+  const webVersion = await resolveWebVersion();
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: DATA_DIR }),
-    // Pin WhatsApp Web version — the library's webpack-module injection breaks when
-    // WhatsApp auto-updates their bundle (getChatById throws a minified "r" error when
-    // the loaded version's module IDs no longer match what the library patches).
-    // The wa-version archive only keeps a rolling window of builds; the library's
-    // tested version (2.3000.1017054665) and older pins 404, and with strict:false the
-    // library silently falls back to the live, incompatible WhatsApp Web. 2.3000.1040136519-alpha
-    // is currently the OLDEST build still in the archive (same 2.3000.1040xxxxxx era that
-    // previously loaded without the "r" error). remotePath MUST be the full wa-version URL
-    // (the library substitutes {version}); strict:true fails loudly rather than ever
-    // loading a mismatched live bundle again. If this build later 404s as the archive
-    // rolls forward, bump to the new oldest entry from
-    // https://api.github.com/repos/wppconnect-team/wa-version/contents/html?ref=main
-    webVersion: '2.3000.1040136519-alpha',
+    webVersion,
     webVersionCache: {
       type: 'remote',
       remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
