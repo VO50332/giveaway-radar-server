@@ -5,15 +5,25 @@ const AVAILABLE_SIGNALS = ['✅', '🟢', '🆓', 'free', 'available', 'פנוי
 // Signals that indicate item is taken
 const TAKEN_SIGNALS = ['💾', '❌', '🔴', 'taken', 'sold', 'gone', 'נלקח', 'נתפס', 'נמכר', 'אזל'];
 
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Check if a message matches any of the keywords
+ * Check if a message matches any of the keywords as WHOLE WORDS.
+ * Uses Unicode-aware boundaries (\p{L} any letter, \p{N} any number) so it works
+ * for Hebrew too — "תיק" will NOT match inside "תיקון".
  * Returns { matched: boolean, keywords: string[] }
  */
 function checkMatch(content, keywords) {
   if (!content || !keywords || keywords.length === 0) return { matched: false, keywords: [] };
 
-  const lower = content.toLowerCase();
-  const matchedKeywords = keywords.filter(kw => lower.includes(kw.toLowerCase()));
+  const matchedKeywords = keywords.filter(kw => {
+    const escaped = escapeRegExp((kw || '').trim().toLowerCase());
+    if (!escaped) return false;
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
+    return re.test(content);
+  });
 
   return {
     matched: matchedKeywords.length > 0,
