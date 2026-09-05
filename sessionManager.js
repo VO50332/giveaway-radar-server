@@ -478,7 +478,7 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
   const activeItems = wishlistItems.filter(i => i.status === 'watching');
 
   for (const item of activeItems) {
-    const matchResult = matcher.checkMatch(content, item.keywords);
+    const matchResult = matcher.checkMatch(content, item.keywords, item.match_mode, item.exclude_keywords);
     if (!matchResult.matched) continue;
 
     // Skip if we already matched this message for this wishlist item
