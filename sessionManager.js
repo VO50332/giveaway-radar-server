@@ -1012,6 +1012,36 @@ async function getGroups(userId) {
   return { groups };
 }
 
+// Validate that a group name exists in the user's WhatsApp account, and suggest
+// similar names if it doesn't. Used by the Add Group flow so users don't monitor
+// a group that isn't actually on their account.
+async function validateGroup(userId, groupName) {
+  if (!sessions.has(userId)) return { error: 'no_active_session' };
+  const session = sessions.get(userId);
+  if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
+  const chats = await Promise.race([
+    session.client.getChats(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
+  ]).catch(err => ({ error: err.message }));
+  if (!Array.isArray(chats)) return { error: chats.error || 'getChats_failed' };
+  const groups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
+  const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const target = norm(groupName);
+  if (!target) return { error: 'empty_name' };
+  const exact = groups.find(g => norm(g.name) === target);
+  if (exact) return { exists: true, match: exact };
+  const targetTokens = new Set(target.split(' ').filter(t => t.length > 1));
+  const scored = groups.map(g => {
+    const n = norm(g.name);
+    let score = 0;
+    if (n.includes(target) || target.includes(n)) score += 5;
+    const gTokens = new Set(n.split(' ').filter(t => t.length > 1));
+    for (const t of targetTokens) if (gTokens.has(t)) score += 2;
+    return { name: g.name, id: g.id, score };
+  }).filter(g => g.score > 0).sort((a, b) => b.score - a.score).slice(0, 6);
+  return { exists: false, suggestions: scored };
+}
+
 // Auto-reconnect all sessions marked "connected" in the DB
 // Called on server startup to restore connections after redeploy
 // If session_data exists, restore from it; otherwise start fresh (new QR)
@@ -1044,4 +1074,4 @@ async function reconnectWithToken(userId, authToken, appId) {
   }
 }
 
-module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, reconnectWithToken, verifyConnection, getDiagnostics, rescanMessages, getGroups };
+module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, reconnectWithToken, verifyConnection, getDiagnostics, rescanMessages, getGroups, validateGroup };
