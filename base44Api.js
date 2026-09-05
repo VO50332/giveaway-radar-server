@@ -247,6 +247,32 @@ async function runApiDiagnostic(userId, token) {
   return result;
 }
 
+async function uploadSessionData(userId, json) {
+  try {
+    const client = await getClient(userId);
+    const buffer = Buffer.from(json, 'utf8');
+    const file = new Blob([buffer], { type: 'application/json' });
+    const result = await client.integrations.Core.UploadPrivateFile({ file });
+    return result.file_uri || null;
+  } catch (err) {
+    console.error('uploadSessionData error:', err.message);
+    return null;
+  }
+}
+
+async function downloadSessionData(userId, fileUri) {
+  try {
+    const client = await getClient(userId);
+    const { signed_url } = await client.integrations.Core.CreateFileSignedUrl({ file_uri: fileUri, expires_in: 300 });
+    const res = await fetch(signed_url);
+    if (!res.ok) throw new Error(`fetch_status_${res.status}`);
+    return await res.text();
+  } catch (err) {
+    console.error('downloadSessionData error:', err.message);
+    return null;
+  }
+}
+
 module.exports = {
   setUserToken,
   updateSession,
@@ -265,4 +291,6 @@ module.exports = {
   listAllConnectedGroups,
   runApiDiagnostic,
   uploadMedia,
+  uploadSessionData,
+  downloadSessionData,
 };
