@@ -1001,13 +1001,20 @@ async function getGroups(userId) {
   if (!sessions.has(userId)) return { error: 'no_active_session' };
   const session = sessions.get(userId);
   if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
-  const chats = await Promise.race([
-    session.client.getChats(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-  ]).catch(err => {
-    return { error: err.message };
-  });
-  if (!Array.isArray(chats)) return { error: chats.error || 'getChats_failed' };
+  let chats;
+  try {
+    chats = await Promise.race([
+      session.client.getChats(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
+    ]);
+  } catch (err) {
+    // Client is in memory but the underlying connection is dead (e.g. Chromium
+    // page closed). Surface a stable 'not_connected' so the UI can guide the
+    // user to reconnect instead of showing a cryptic internal error.
+    session.status = 'disconnected';
+    return { error: 'not_connected', detail: err.message };
+  }
+  if (!Array.isArray(chats)) return { error: 'getChats_failed' };
   const groups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
   return { groups };
 }
