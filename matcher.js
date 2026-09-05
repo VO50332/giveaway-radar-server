@@ -15,20 +15,35 @@ function escapeRegExp(string) {
  * for Hebrew too — "תיק" will NOT match inside "תיקון".
  * Returns { matched: boolean, keywords: string[] }
  */
-function checkMatch(content, keywords) {
+function wholeWordTest(content, kw) {
+  const escaped = escapeRegExp((kw || '').trim().toLowerCase());
+  if (!escaped) return false;
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(content);
+}
+
+/**
+ * Check if a message matches the wishlist keywords.
+ *  - matchMode 'all' (AND): every keyword must appear (as a whole word).
+ *  - matchMode 'any' (OR) [default]: at least one keyword must appear.
+ *  - excludeKeywords: if ANY appears as a whole word, the message is skipped.
+ * Returns { matched: boolean, keywords: string[] }
+ */
+function checkMatch(content, keywords, matchMode, excludeKeywords) {
   if (!content || !keywords || keywords.length === 0) return { matched: false, keywords: [] };
 
-  const matchedKeywords = keywords.filter(kw => {
-    const escaped = escapeRegExp((kw || '').trim().toLowerCase());
-    if (!escaped) return false;
-    const re = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
-    return re.test(content);
-  });
+  // Exclusions take precedence — a single excluded word disqualifies the message.
+  if (excludeKeywords && excludeKeywords.length > 0) {
+    const hasExcluded = excludeKeywords.some(kw => wholeWordTest(content, kw));
+    if (hasExcluded) return { matched: false, keywords: [] };
+  }
 
-  return {
-    matched: matchedKeywords.length > 0,
-    keywords: matchedKeywords,
-  };
+  const matchedKeywords = keywords.filter(kw => wholeWordTest(content, kw));
+
+  const matched = matchMode === 'all'
+    ? matchedKeywords.length === keywords.length
+    : matchedKeywords.length > 0;
+
+  return { matched, keywords: matchedKeywords };
 }
 
 /**
