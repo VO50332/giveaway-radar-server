@@ -518,8 +518,22 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
     // Don't notify about items already marked as taken
     if (availabilityStatus === 'taken') continue;
 
-    let notifStatus = 'pending';
+    // In-app notification — always created so the match shows up in the
+    // Notifications list and triggers the in-app toast (in addition to WhatsApp).
+    await base44Api.createNotification(userId, apiKey, appId, {
+      user_id: userId,
+      match_id: match.id,
+      wishlist_item_title: item.title,
+      group_name: groupName,
+      message_preview: content.slice(0, 150),
+      channel: 'in_app',
+      status: 'sent',
+      sent_at: new Date().toISOString(),
+    });
+
+    // WhatsApp notification (optional) — kept in addition to the in-app one.
     if (item.notify_via_whatsapp) {
+      let waStatus = 'pending';
       const userPhone = await base44Api.getUserPhone(userId, apiKey, appId);
       if (userPhone) {
         // WhatsApp JIDs must be digits only — a stored "+972..." becomes the
@@ -531,25 +545,24 @@ async function processMessage(userId, apiKey, appId, client, msg, emit, existing
         try {
           await client.sendMessage(`${cleanPhone}@c.us`, introMsg);
           await msg.forward(`${cleanPhone}@c.us`);
-          notifStatus = 'sent';
+          waStatus = 'sent';
           await base44Api.updateMatch(userId, apiKey, appId, match.id, { notification_sent: true });
         } catch (sendErr) {
           console.error(`[${userId}] WhatsApp send/forward failed:`, sendErr.message);
-          notifStatus = 'failed';
+          waStatus = 'failed';
         }
       }
+      await base44Api.createNotification(userId, apiKey, appId, {
+        user_id: userId,
+        match_id: match.id,
+        wishlist_item_title: item.title,
+        group_name: groupName,
+        message_preview: content.slice(0, 150),
+        channel: 'whatsapp',
+        status: waStatus,
+        sent_at: new Date().toISOString(),
+      });
     }
-
-    await base44Api.createNotification(userId, apiKey, appId, {
-      user_id: userId,
-      match_id: match.id,
-      wishlist_item_title: item.title,
-      group_name: groupName,
-      message_preview: content.slice(0, 150),
-      channel: item.notify_via_whatsapp ? 'whatsapp' : 'in_app',
-      status: notifStatus,
-      sent_at: new Date().toISOString(),
-    });
   }
 }
 
