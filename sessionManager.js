@@ -62,8 +62,15 @@ async function saveSessionToDb(userId, apiKey, appId) {
     walk(sessionDir);
 
     const json = JSON.stringify(files);
-    await base44Api.updateSession(userId, apiKey, appId, { session_data: json });
-    console.log(`[${userId}] Session saved to DB (${Math.round(json.length / 1024)}KB)`);
+    // session_data is too large for an entity field, so store it as a private
+    // file and keep only the file_uri in the entity.
+    const fileUri = await base44Api.uploadSessionData(userId, json);
+    if (!fileUri) {
+      console.error(`[${userId}] saveSessionToDb: private-file upload failed`);
+      return;
+    }
+    await base44Api.updateSession(userId, apiKey, appId, { session_data: fileUri });
+    console.log(`[${userId}] Session saved to DB as private file (${Math.round(json.length / 1024)}KB)`);
   } catch (err) {
     console.error(`[${userId}] saveSessionToDb error:`, err.message);
   }
@@ -75,7 +82,10 @@ async function restoreSessionFromDb(userId, apiKey, appId) {
     const dbSession = await base44Api.getWhatsAppSession(userId, apiKey, appId);
     if (!dbSession || !dbSession.session_data) return false;
 
-    const files = JSON.parse(dbSession.session_data);
+    // session_data now holds a private-file uri (not the JSON itself) — download it.
+    const json = await base44Api.downloadSessionData(userId, dbSession.session_data);
+    if (!json) return false;
+    const files = JSON.parse(json);
     const sessionDir = path.join(DATA_DIR, 'session-' + userId);
     fs.mkdirSync(sessionDir, { recursive: true });
 
@@ -84,7 +94,7 @@ async function restoreSessionFromDb(userId, apiKey, appId) {
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, Buffer.from(base64, 'base64'));
     }
-    console.log(`[${userId}] Session restored from DB (${Object.keys(files).length} files)`);
+    console.log(`[${userId}] Session restored from DB private file (${Object.keys(files).length} files)`);
     return true;
   } catch (err) {
     console.error(`[${userId}] restoreSessionFromDb error:`, err.message);
