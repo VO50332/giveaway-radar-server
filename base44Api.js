@@ -196,8 +196,9 @@ async function uploadMedia(userId, base64Data, mimetype, filename) {
   try {
     const client = await getClient(userId);
     const buffer = Buffer.from(base64Data, 'base64');
-    const file = new Blob([buffer], { type: mimetype || 'image/jpeg' });
-    const result = await client.integrations.Core.UploadFile({ file, filename });
+    const { File } = require('node:buffer');
+    const file = new File([buffer], filename || 'image.jpg', { type: mimetype || 'image/jpeg' });
+    const result = await client.integrations.Core.UploadPublicFile({ file });
     return result.file_url || null;
   } catch (err) {
     console.error('uploadMedia error:', err.message);
@@ -251,7 +252,8 @@ async function uploadSessionData(userId, json) {
   try {
     const client = await getClient(userId);
     const buffer = Buffer.from(json, 'utf8');
-    const file = new Blob([buffer], { type: 'application/json' });
+    const { File } = require('node:buffer');
+    const file = new File([buffer], 'session.json', { type: 'application/json' });
     const result = await client.integrations.Core.UploadPrivateFile({ file });
     return result.file_uri || null;
   } catch (err) {
