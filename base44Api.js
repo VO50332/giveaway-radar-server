@@ -252,12 +252,14 @@ async function uploadSessionData(userId, json) {
   try {
     const client = await getClient(userId);
     const buffer = Buffer.from(json, 'utf8');
+    console.log(`[uploadSessionData] size=${Math.round(buffer.length / 1024)}KB, userId=${userId}`);
     const { File } = require('node:buffer');
     const file = new File([buffer], 'session.json', { type: 'application/json' });
     const result = await client.integrations.Core.UploadPrivateFile({ file });
+    console.log('[uploadSessionData] upload result:', JSON.stringify(result).substring(0, 200));
     return result.file_uri || null;
   } catch (err) {
-    console.error('uploadSessionData error:', err.message);
+    console.error('[uploadSessionData] error:', err.message, '\nStack:', err.stack?.split('\n').slice(0, 5).join('\n'));
     return null;
   }
 }
