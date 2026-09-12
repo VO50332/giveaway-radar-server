@@ -1099,26 +1099,56 @@ function getSessionCount() {
   return sessions.size;
 }
 
+// Lightweight group listing — reads the in-memory WhatsApp Web store directly
+// via pupPage.evaluate instead of calling getChats(). getChats() loads every
+// chat + message history into memory, which OOMs the Railway container and
+// kills the session. The store-based approach is synchronous (no server fetch)
+// and only serializes the group names + ids we need.
 async function getGroups(userId) {
   if (!sessions.has(userId)) return { error: 'no_active_session' };
   const session = sessions.get(userId);
   if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
-  let chats;
   try {
-    chats = await Promise.race([
-      session.client.getChats(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
+    const groups = await Promise.race([
+      session.client.pupPage.evaluate(() => {
+        if (!window.Store || !window.Store.Chat) return [];
+        const arr = window.Store.Chat.getModelsArray
+          ? window.Store.Chat.getModelsArray()
+          : (window.Store.Chat.models || []);
+        const result = [];
+        for (const c of arr) {
+          if (!c || !c.isGroup) continue;
+          const cid = c.id;
+          const serialized = cid?._serialized || (typeof cid?.toString === 'function' ? cid.toString() : null);
+          if (serialized && c.name) result.push({ name: c.name, id: serialized });
+        }
+        return result;
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getGroups_store_timeout_30s')), 30000)),
     ]);
+    return { groups };
   } catch (err) {
-    // Client is in memory but the underlying connection is dead (e.g. Chromium
-    // page closed). Surface a stable 'not_connected' so the UI can guide the
-    // user to reconnect instead of showing a cryptic internal error.
-    session.status = 'disconnected';
-    return { error: 'not_connected', detail: err.message };
+    // If the store is empty (freshly linked, chats not synced yet), fall back
+    // to getChats() but with a tight timeout. This is a last resort — it may
+    // OOM on accounts with many chats, but it's better than returning nothing
+    // for users whose chats ARE synced.
+    if (String(err.message).includes('timeout') || String(err.message).includes('Target closed')) {
+      session.status = 'disconnected';
+      return { error: 'not_connected', detail: err.message };
+    }
+    try {
+      const chats = await Promise.race([
+        session.client.getChats(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_30s')), 30000)),
+      ]);
+      if (!Array.isArray(chats)) return { error: 'getChats_failed' };
+      const fallbackGroups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
+      return { groups: fallbackGroups };
+    } catch (fallbackErr) {
+      session.status = 'disconnected';
+      return { error: 'not_connected', detail: fallbackErr.message };
+    }
   }
-  if (!Array.isArray(chats)) return { error: 'getChats_failed' };
-  const groups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
-  return { groups };
 }
 
 // Validate that a group name exists in the user's WhatsApp account, and suggest
@@ -1128,12 +1158,29 @@ async function validateGroup(userId, groupName) {
   if (!sessions.has(userId)) return { error: 'no_active_session' };
   const session = sessions.get(userId);
   if (session.status !== 'connected' || !session.client) return { error: 'not_connected', status: session.status };
-  const chats = await Promise.race([
-    session.client.getChats(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('getChats_timeout_60s')), 60000)),
-  ]).catch(err => ({ error: err.message }));
-  if (!Array.isArray(chats)) return { error: chats.error || 'getChats_failed' };
-  const groups = chats.filter(c => c.isGroup).map(c => ({ name: c.name, id: c.id._serialized }));
+  // Use the lightweight store-based approach to avoid OOM from getChats()
+  let groups;
+  try {
+    groups = await Promise.race([
+      session.client.pupPage.evaluate(() => {
+        if (!window.Store || !window.Store.Chat) return [];
+        const arr = window.Store.Chat.getModelsArray
+          ? window.Store.Chat.getModelsArray()
+          : (window.Store.Chat.models || []);
+        const result = [];
+        for (const c of arr) {
+          if (!c || !c.isGroup) continue;
+          const cid = c.id;
+          const serialized = cid?._serialized || (typeof cid?.toString === 'function' ? cid.toString() : null);
+          if (serialized && c.name) result.push({ name: c.name, id: serialized });
+        }
+        return result;
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('store_timeout_30s')), 30000)),
+    ]);
+  } catch (err) {
+    return { error: String(err.message).includes('timeout') ? 'not_connected' : err.message };
+  }
   const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const target = norm(groupName);
   if (!target) return { error: 'empty_name' };
