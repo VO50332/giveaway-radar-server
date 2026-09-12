@@ -141,26 +141,38 @@ async function restoreSessionFromDb(userId, apiKey, appId) {
 }
 
 // Remove the local session directory and any stale files.
+// LocalAuth creates TWO directories:
+//   1. {DATA_DIR}/.wwebjs_auth/session-{clientId}/  — WhatsApp auth credentials
+//   2. {DATA_DIR}/session-{clientId}/               — Chromium user-data-dir (profile)
+// If we only clear #1, Puppeteer fails on the next launch with
+// "The browser is already running for {DATA_DIR}/session-{clientId}" because the
+// Chromium profile dir (with its SingletonLock) is still on disk.
 async function clearSessionFiles(userId) {
-  // LocalAuth stores under .wwebjs_auth/session-{clientId}/
-  const sessionDir = path.join(DATA_DIR, '.wwebjs_auth', 'session-' + userId);
-  if (!fs.existsSync(sessionDir)) return;
-  // Retry a few times — Chromium may still be releasing file handles when we
-  // remove the profile dir, causing ENOTEMPTY on the rmdir. Never throw: a
-  // leftover file shouldn't abort the rescan; LocalAuth recreates the structure.
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-      console.log(`[${userId}] Cleared local session files`);
-      return;
-    } catch (err) {
-      if (attempt === 5) {
-        console.error(`[${userId}] clearSessionFiles failed after 5 attempts:`, err.message);
-      } else {
-        await new Promise(r => setTimeout(r, 200 * attempt));
+  const dirs = [
+    path.join(DATA_DIR, '.wwebjs_auth', 'session-' + userId), // auth files
+    path.join(DATA_DIR, 'session-' + userId),                 // Chromium profile
+  ];
+  let clearedAny = false;
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    // Retry a few times — Chromium may still be releasing file handles when we
+    // remove the profile dir, causing ENOTEMPTY on the rmdir. Never throw: a
+    // leftover file shouldn't abort the rescan; LocalAuth recreates the structure.
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+        clearedAny = true;
+        break;
+      } catch (err) {
+        if (attempt === 5) {
+          console.error(`[${userId}] clearSessionFiles failed for ${dir} after 5 attempts:`, err.message);
+        } else {
+          await new Promise(r => setTimeout(r, 200 * attempt));
+        }
       }
     }
   }
+  if (clearedAny) console.log(`[${userId}] Cleared local session files (auth + Chromium profile)`);
 }
 
 async function startSession(userId, apiKey, appId, emit, opts = {}) {
@@ -177,8 +189,13 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
     if (existing.status === 'connected' && !freshStart) {
       return { status: 'already_connected' };
     }
-    // Destroy old session before recreating
+    // Destroy old session before recreating (destroySession waits for Chromium exit)
     await destroySession(userId);
+  } else if (freshStart) {
+    // No in-memory session, but the Chromium profile dir may still be on disk
+    // from a previous run that crashed/redeployed. Clear it so Puppeteer doesn't
+    // fail with "The browser is already running".
+    await clearSessionFiles(userId);
   }
 
   if (freshStart) {
@@ -815,7 +832,13 @@ async function destroySession(userId) {
     await session.client.destroy();
   } catch (_) {}
   sessions.delete(userId);
-  // Also clear stale local session files so they don't interfere with the next link
+  // Wait for Chromium to fully release file handles before clearing — if we
+  // try to rm the profile dir immediately, the SingletonLock file is still held
+  // and the rmdir fails with ENOTEMPTY, leaving the stale profile that causes
+  // "The browser is already running" on the next launch.
+  await new Promise(r => setTimeout(r, 2000));
+  // Also clear stale local session files (auth + Chromium profile) so they
+  // don't interfere with the next link
   await clearSessionFiles(userId);
 }
 
