@@ -75,11 +75,20 @@ async function resolveWebVersion() {
 // --- DB-backed session persistence ---
 // Serialize the session directory to a single JSON string, save to DB.
 async function saveSessionToDb(userId, apiKey, appId) {
+  const sess = sessions.get(userId);
+  const logSave = (type, data = {}) => {
+    console.log(`[${userId}] SAVE ${type}: ${JSON.stringify(data)}`);
+    if (sess) {
+      sess.eventLog = sess.eventLog || [];
+      sess.eventLog.push({ type: `save_${type}`, data, ts: Date.now() });
+      if (sess.eventLog.length > 80) sess.eventLog.shift();
+    }
+  };
   try {
     // LocalAuth stores under .wwebjs_auth/session-{clientId}/, NOT session-{clientId}/
     const sessionDir = path.join(DATA_DIR, '.wwebjs_auth', 'session-' + userId);
     if (!fs.existsSync(sessionDir)) {
-      console.error(`[${userId}] saveSessionToDb: session dir not found at ${sessionDir}`);
+      logSave('dir_not_found', { dir: sessionDir });
       return;
     }
 
@@ -97,19 +106,22 @@ async function saveSessionToDb(userId, apiKey, appId) {
       }
     }
     walk(sessionDir);
+    logSave('files_collected', { count: Object.keys(files).length });
 
     const json = JSON.stringify(files);
+    logSave('json_size', { kb: Math.round(json.length / 1024) });
     // session_data is too large for an entity field, so store it as a private
     // file and keep only the file_uri in the entity.
     const fileUri = await base44Api.uploadSessionData(userId, json);
     if (!fileUri) {
-      console.error(`[${userId}] saveSessionToDb: private-file upload failed`);
+      logSave('upload_failed', { reason: 'uploadSessionData returned null' });
       return;
     }
+    logSave('uploaded', { fileUri: fileUri.substring(0, 80) });
     await base44Api.updateSession(userId, apiKey, appId, { session_data: fileUri });
-    console.log(`[${userId}] Session saved to DB as private file (${Math.round(json.length / 1024)}KB)`);
+    logSave('db_updated', { kb: Math.round(json.length / 1024) });
   } catch (err) {
-    console.error(`[${userId}] saveSessionToDb error:`, err.message);
+    logSave('error', { message: err.message, stack: err.stack?.split('\n').slice(0, 3).join(' | ') });
   }
 }
 
@@ -1171,4 +1183,4 @@ async function reconnectWithToken(userId, authToken, appId) {
   }
 }
 
-module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, reconnectWithToken, verifyConnection, getDiagnostics, rescanMessages, getGroups, validateGroup };
+module.exports = { startSession, disconnectSession, getStatus, getSessionCount, autoReconnect, reconnectWithToken, verifyConnection, getDiagnostics, rescanMessages, getGroups, validateGroup, saveSessionToDb };
