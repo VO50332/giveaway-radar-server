@@ -17,26 +17,59 @@ const DATA_DIR = process.env.DATA_DIR || '/data';
 // archive from the GitHub contents API at session start — it's always present, and
 // it's the most stable end of the rolling window. Falls back to a known-good pin
 // only if the API is unreachable (rate limit / outage).
-const FALLBACK_WEB_VERSION = '2.3000.1041871181-alpha';
+// Returns a version string, or null if the archive is unreachable (in which
+// case we skip pinning entirely and let whatsapp-web.js load the current
+// version from WhatsApp's servers — less stable but always works, unlike a
+// stale pin that 404s).
 async function resolveWebVersion() {
+  // Strategy 1: GitHub contents API (directory listing)
   try {
     const res = await fetch('https://api.github.com/repos/wppconnect-team/wa-version/contents/html?ref=main', {
       headers: { 'User-Agent': 'giveaway-radar' },
     });
-    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-    const files = await res.json();
-    const versions = files
-      .filter(f => f.name && f.name.endsWith('.html'))
-      .map(f => f.name.replace(/\.html$/, ''))
-      .sort();
-    if (versions.length === 0) throw new Error('no builds in archive');
-    const oldest = versions[0];
-    console.log(`[sessionManager] Resolved WhatsApp Web version ${oldest} (${versions.length} builds available)`);
-    return oldest;
+    if (res.ok) {
+      const files = await res.json();
+      const versions = files
+        .filter(f => f.name && f.name.endsWith('.html'))
+        .map(f => f.name.replace(/\.html$/, ''))
+        .sort();
+      if (versions.length > 0) {
+        const oldest = versions[0];
+        console.log(`[sessionManager] Resolved WhatsApp Web version ${oldest} via contents API (${versions.length} builds)`);
+        return oldest;
+      }
+    } else {
+      console.error(`[sessionManager] resolveWebVersion contents API: HTTP ${res.status}`);
+    }
   } catch (err) {
-    console.error(`[sessionManager] resolveWebVersion failed (${err.message}) — using fallback ${FALLBACK_WEB_VERSION}`);
-    return FALLBACK_WEB_VERSION;
+    console.error(`[sessionManager] resolveWebVersion contents API failed: ${err.message}`);
   }
+
+  // Strategy 2: Git trees API (handles large directories, different rate-limit bucket)
+  try {
+    const res = await fetch('https://api.github.com/repos/wppconnect-team/wa-version/git/trees/main?recursive=1', {
+      headers: { 'User-Agent': 'giveaway-radar' },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const versions = (data.tree || [])
+        .filter(f => f.path && f.path.startsWith('html/') && f.path.endsWith('.html'))
+        .map(f => f.path.replace('html/', '').replace(/\.html$/, ''))
+        .sort();
+      if (versions.length > 0) {
+        const oldest = versions[0];
+        console.log(`[sessionManager] Resolved WhatsApp Web version ${oldest} via git trees API (${versions.length} builds)`);
+        return oldest;
+      }
+    } else {
+      console.error(`[sessionManager] resolveWebVersion git trees API: HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`[sessionManager] resolveWebVersion git trees API failed: ${err.message}`);
+  }
+
+  console.error(`[sessionManager] resolveWebVersion: all strategies failed — skipping version pin (library default will be used)`);
+  return null;
 }
 
 // --- DB-backed session persistence ---
@@ -163,14 +196,8 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
   // Resolve the oldest WhatsApp Web build currently in the wa-version archive so the
   // version pin never 404s as the archive rolls forward. (See resolveWebVersion above.)
   const webVersion = await resolveWebVersion();
-  const client = new Client({
+  const clientOpts = {
     authStrategy: new LocalAuth({ clientId: userId, dataPath: DATA_DIR }),
-    webVersion,
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
-      strict: true,
-    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -186,7 +213,18 @@ async function startSession(userId, apiKey, appId, emit, opts = {}) {
         '--disable-renderer-backgrounding',
       ],
     },
-  });
+  };
+  if (webVersion) {
+    clientOpts.webVersion = webVersion;
+    clientOpts.webVersionCache = {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+      strict: true,
+    };
+  } else {
+    console.log(`[${userId}] No version pin — whatsapp-web.js will load the current version from WhatsApp directly`);
+  }
+  const client = new Client(clientOpts);
 
   sessions.set(userId, { client, status: 'initializing', apiKey, appId, eventLog: [], initStartedAt: Date.now() });
 
