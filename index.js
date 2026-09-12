@@ -126,6 +126,35 @@ app.get('/session/groups/:userId', async (req, res) => {
   }
 });
 
+// Validate that a group name exists in the user's WhatsApp account (for Add Group)
+app.post('/session/validate-group/:userId', async (req, res) => {
+  try {
+    const authToken = req.body.authToken;
+    if (authToken) require('./base44Api').setUserToken(req.params.userId, authToken);
+    const result = await sessionManager.validateGroup(req.params.userId, req.body.groupName);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manually trigger session data save (for debugging persistence failures)
+app.post('/session/save/:userId', async (req, res) => {
+  const userId = req.params.userId;
+  const authToken = req.body.authToken;
+  const appId = req.body.appId || process.env.BASE44_APP_ID;
+  if (authToken) require('./base44Api').setUserToken(userId, authToken);
+  try {
+    await sessionManager.saveSessionToDb(userId, authToken, appId);
+    // Return the event log so we can see what happened
+    const status = sessionManager.getStatus(userId);
+    const saveEvents = (status.eventLog || []).filter(e => e.type.startsWith('save_'));
+    res.json({ saveEvents });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Verify that the WhatsApp connection is actually alive (not just in-memory status)
 app.get('/session/verify/:userId', async (req, res) => {
   try {
