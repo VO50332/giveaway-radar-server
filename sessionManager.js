@@ -76,8 +76,12 @@ async function resolveWebVersion() {
 // Serialize the session directory to a single JSON string, save to DB.
 async function saveSessionToDb(userId, apiKey, appId) {
   try {
-    const sessionDir = path.join(DATA_DIR, 'session-' + userId);
-    if (!fs.existsSync(sessionDir)) return;
+    // LocalAuth stores under .wwebjs_auth/session-{clientId}/, NOT session-{clientId}/
+    const sessionDir = path.join(DATA_DIR, '.wwebjs_auth', 'session-' + userId);
+    if (!fs.existsSync(sessionDir)) {
+      console.error(`[${userId}] saveSessionToDb: session dir not found at ${sessionDir}`);
+      return;
+    }
 
     const files = {};
     function walk(dir, relPath = '') {
@@ -119,7 +123,8 @@ async function restoreSessionFromDb(userId, apiKey, appId) {
     const json = await base44Api.downloadSessionData(userId, dbSession.session_data);
     if (!json) return false;
     const files = JSON.parse(json);
-    const sessionDir = path.join(DATA_DIR, 'session-' + userId);
+    // LocalAuth stores under .wwebjs_auth/session-{clientId}/
+    const sessionDir = path.join(DATA_DIR, '.wwebjs_auth', 'session-' + userId);
     fs.mkdirSync(sessionDir, { recursive: true });
 
     for (const [relPath, base64] of Object.entries(files)) {
@@ -137,7 +142,8 @@ async function restoreSessionFromDb(userId, apiKey, appId) {
 
 // Remove the local session directory and any stale files.
 async function clearSessionFiles(userId) {
-  const sessionDir = path.join(DATA_DIR, 'session-' + userId);
+  // LocalAuth stores under .wwebjs_auth/session-{clientId}/
+  const sessionDir = path.join(DATA_DIR, '.wwebjs_auth', 'session-' + userId);
   if (!fs.existsSync(sessionDir)) return;
   // Retry a few times — Chromium may still be releasing file handles when we
   // remove the profile dir, causing ENOTEMPTY on the rmdir. Never throw: a
